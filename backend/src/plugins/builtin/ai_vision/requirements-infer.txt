@@ -1,0 +1,6 @@
+# AI 视觉平台 L1 推理层依赖（必装，约 75MB）
+# 全 MIT/Apache 宽松协议，无 AGPL 风险
+onnxruntime>=1.17.0
+opencv-python-headless>=4.9.0
+numpy>=1.24.0
+pillow>=10.0.0

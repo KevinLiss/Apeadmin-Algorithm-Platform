@@ -1,0 +1,43 @@
+{
+  "schema_version": "1.0",
+  "description": "AI 视觉平台一期内置模型清单。install/seed 时按此清单注册 ai_vision_models 记录并校验 SHA256。",
+  "models": [
+    {
+      "name": "yolo11n-coco",
+      "file": "yolo11n-coco.onnx",
+      "version": "1.0.0",
+      "sha256": "634279b40c07c6391472c51ad45b81ebc48706a9a1fe72dd3396322acd0c053b",
+      "file_size": 10930182,
+      "category_map": {
+        "0": "person",
+        "2": "vehicle",
+        "5": "vehicle",
+        "7": "vehicle"
+      },
+      "input_size": 640,
+      "quantized": false,
+      "source": "builtin",
+      "url": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.onnx",
+      "license_note": "YOLO11n 官方预训练权重（COCO 80 类）导出 ONNX。来源: https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.onnx。YOLO11 权重遵循 AGPL-3.0（仅训练/权重层面），部署推理层使用 ONNX Runtime 属宽松协议；商用前需评估 AGPL 影响。",
+      "classes": ["person", "vehicle"]
+    },
+    {
+      "name": "fire-smoke-v1",
+      "file": "fire-smoke-v1.onnx",
+      "version": "1.0.0",
+      "sha256": "2026cc6a812a08f112077acdff7b06123df8125f8f4dc01fe598bdfd79968d01",
+      "file_size": 44722532,
+      "category_map": {
+        "0": "fire",
+        "2": "smoke"
+      },
+      "input_size": 640,
+      "quantized": false,
+      "source": "builtin",
+      "manual_url": "https://github.com/Abonia1/YOLOv8-Fire-and-Smoke-Detection",
+      "license_note": "开源 fire-smoke 检测权重（YOLOv8s 结构，3 类 Fire/default/smoke，已剔除 default 标注垃圾类）导出 ONNX。来源: https://github.com/Abonia1/YOLOv8-Fire-and-Smoke-Detection。AGPL-3.0，商用前需评估。",
+      "description": "明火+烟雾检测（一期明火/烟雾事件使用）",
+      "classes": ["fire", "smoke"]
+    }
+  ]
+}

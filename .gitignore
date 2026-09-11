@@ -24,6 +24,10 @@ runtimes/
 
 # Runtime uploads (plugin packages / media)
 backend/src/uploads/
+# 插件运行时产物（ai_vision 抓拍图/样本图/上传视频等）
+backend/uploads/
+# ai_vision 内置模型大文件不入库（克隆后用 fetch_models 脚本获取，见插件 README）
+backend/src/plugins/builtin/ai_vision/assets/models/*.onnx
 # 后端挂载的静态构建产物（由前端构建后同步拷贝）
 backend/frontend_dist/
 

@@ -220,6 +220,7 @@ async def chat_stream(
     temperature: float = 0.7,
     enable_tools: bool = True,
     user: User | None = None,
+    system_prompt: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """Streaming chat with tool execution. Yields SSE-format data.
 
@@ -228,6 +229,9 @@ async def chat_stream(
     - {"type":"tool_call","name":"get_user_list","arguments":{...}}
     - {"type":"tool_result","name":"get_user_list","result":{...}}
     - {"type":"done"}
+
+    ``system_prompt`` overrides the default admin-assistant prompt, which
+    lets plugins (e.g. bot_saas) run their own persona instead.
     """
     config = _get_provider_config(provider)
     api_key = decrypt_api_key(provider.api_key_enc)
@@ -235,7 +239,7 @@ async def chat_stream(
     tools = _build_tools_for_llm(enable_tools)
 
     llm_messages: list[dict[str, Any]] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt if system_prompt is not None else SYSTEM_PROMPT},
         *messages,
     ]
 

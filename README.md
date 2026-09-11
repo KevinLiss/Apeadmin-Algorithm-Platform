@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: '6721019d-9b32-4893-a967-9bd4b6fb48f9'
-  PropagateID: '6721019d-9b32-4893-a967-9bd4b6fb48f9'
-  ReservedCode1: '61b168dc-2531-4399-a867-142495f90901'
-  ReservedCode2: '61b168dc-2531-4399-a867-142495f90901'
+  ProduceID: '2bfd1a26-5353-413b-bb44-31da5d277194'
+  PropagateID: '2bfd1a26-5353-413b-bb44-31da5d277194'
+  ReservedCode1: '1d482195-5a3a-495a-9f20-1f9ade2e6c96'
+  ReservedCode2: '1d482195-5a3a-495a-9f20-1f9ade2e6c96'
 ---
 
 <div align="center">
@@ -79,6 +79,13 @@ WordPress 式开箱体验，无需手工编辑配置文件：
 - **ZIP 安装** —— 支持上传 ZIP 包导入插件，无需手动放置文件
 - **插件市场** —— 在线浏览、搜索、下载社区插件，开发者发布插件与安装包
 - **能力注册** —— 插件可注册自有路由、MCP 工具、事件监听器
+
+### AI 视觉平台（内置插件）
+
+- **事件驱动** —— 类别库 → 识别事件 → 任务编排 → 自动告警 → 样本训练闭环
+- **双视频源** —— RTSP 摄像头 / 本地视频文件（上传后循环播放，无摄像头也能体验）
+- **纯 CPU 推理** —— ONNX Runtime + 帧率限流，无 GPU 也可运行，内置人/车/明火烟雾识别
+- **分层环境** —— 推理层/训练层依赖按需安装，模型文件不随仓库分发，提供一键获取脚本
 
 ### MCP-SSE 网关
 
@@ -224,6 +231,7 @@ apeadmin/
         manager.py               # 插件发现/加载/安装/卸载
         builtin/                 # 内置插件（按需放入，目录动态扫描）
           dev_example/           # 插件开发示例
+          ai_vision/             # AI 视觉平台（人/车/明火识别，见插件内 README）
       setup_wizard/              # 安装向导（未安装时挂载）
         state.py                 # 安装状态（setup.lock / .env 读写）
         api.py                   # 向导 API（状态/测试连接/执行安装）

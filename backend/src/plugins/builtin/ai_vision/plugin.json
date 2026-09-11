@@ -1,0 +1,8 @@
+{
+  "name": "ai_vision",
+  "display_name": "AI 视觉平台",
+  "version": "0.1.0",
+  "description": "AI 视觉算法管理平台：类别库 → 识别事件 → 摄像头推理 → 告警 → 样本训练闭环，运行时依赖分层一键安装",
+  "author": "KevinLiss",
+  "dependencies": []
+}

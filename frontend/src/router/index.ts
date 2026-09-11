@@ -63,7 +63,8 @@ router.beforeEach(async (to, _from, next) => {
     try {
       if (!userStore.menus.length) await userStore.fetchUserInfo()
       registerDynamicRoutes(userStore.menus)
-      next({ path: to.fullPath, replace: true })
+      // 注意：必须用 fullPath（含 query），且 next() 支持字符串地址
+      next(to.fullPath)
     } catch { userStore.reset(); next('/login') }
     return
   }
