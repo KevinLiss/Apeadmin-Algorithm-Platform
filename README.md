@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: 'f97954ca-a259-469d-a85b-f795c9a3160a'
-  PropagateID: 'f97954ca-a259-469d-a85b-f795c9a3160a'
-  ReservedCode1: 'eed43ef4-12ec-43c2-bd87-7259e50521e2'
-  ReservedCode2: 'eed43ef4-12ec-43c2-bd87-7259e50521e2'
+  ProduceID: 'ba32318a-0004-4410-999e-30254d28d5bb'
+  PropagateID: 'ba32318a-0004-4410-999e-30254d28d5bb'
+  ReservedCode1: 'bc14c706-633a-4aae-9d4c-6ff335c56410'
+  ReservedCode2: 'bc14c706-633a-4aae-9d4c-6ff335c56410'
 ---
 
 <div align="center">
@@ -59,21 +59,22 @@ ApeAdmin Algorithm Platform 是一个开箱即用的 **AI 视觉算法管理平�
 <table>
   <tr>
     <td width="50%" align="center">
-      <img src="frontend/src/assets/ai_vision/guide.jpg" alt="平台引导" /><br/>
-      <sub><b>仪表盘 · 全局态势总览</b></sub>
+      <img src="assets/screenshots/ai_vision/dashboard.png" alt="仪表盘" /><br/>
+      <sub><b>仪表盘 · 运营数据与告警态势总览</b></sub>
     </td>
     <td width="50%" align="center">
-      <img src="frontend/src/assets/ai_vision/categories.jpg" alt="类别库" /><br/>
-      <sub><b>类别库 · 识别类别管理</b></sub>
+      <img src="assets/screenshots/ai_vision/events.png" alt="识别事件" /><br/>
+      <sub><b>识别事件 · 类别阈值与抓拍规则配置</b></sub>
     </td>
   </tr>
   <tr>
     <td width="50%" align="center">
-      <img src="frontend/src/assets/ai_vision/runtime-env.jpg" alt="运行环境" /><br/>
-      <sub><b>运行环境 · 分层依赖控制台</b></sub>
+      <img src="assets/screenshots/ai_vision/alarms.png" alt="告警中心" /><br/>
+      <sub><b>告警中心 · 抓拍图预览与状态流转</b></sub>
     </td>
     <td width="50%" align="center">
-      <sub><b>任务编排 · 视频源×事件灵活组合</b><br/>告警中心 · 抓拍图统一处理</sub>
+      <img src="assets/screenshots/ai_vision/cameras.png" alt="视频源" /><br/>
+      <sub><b>视频源 · RTSP 摄像头 / 本地视频管理</b></sub>
     </td>
   </tr>
 </table>
