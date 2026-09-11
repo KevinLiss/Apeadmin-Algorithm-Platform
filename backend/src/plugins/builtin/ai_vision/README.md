@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: 'df730fdc-5d92-485a-b6e5-800e1a80bd13'
-  PropagateID: 'df730fdc-5d92-485a-b6e5-800e1a80bd13'
-  ReservedCode1: '8fc9777f-538d-433e-b747-928880b6d1a2'
-  ReservedCode2: '8fc9777f-538d-433e-b747-928880b6d1a2'
+  ProduceID: '43cb57b1-1b99-46b7-99fd-84906c2e8d74'
+  PropagateID: '43cb57b1-1b99-46b7-99fd-84906c2e8d74'
+  ReservedCode1: '7abdd445-855c-406f-bbf2-06ac26daae15'
+  ReservedCode2: '7abdd445-855c-406f-bbf2-06ac26daae15'
 ---
 
 # AI 视觉插件（ai_vision）
@@ -15,7 +15,7 @@ AIGC:
 
 ## 拉取仓库后快速跑起来
 
-**模型 ONNX 文件不随 git 分发**（两个模型共约 53MB 二进制），克隆仓库后模型目录为空，按下面步骤补齐：
+**模型 ONNX 文件不随 git 分发**（两个模型共约 53MB 二进制），克隆仓库后模型目录为空。两个模型的下载地址均已内置（ultralytics 官方直链 + 本项目 Release 附件），按下面步骤一键补齐：
 
 ### 方式一：脚本一键获取（推荐）
 
@@ -37,7 +37,7 @@ python -m src.plugins.builtin.ai_vision.scripts.fetch_models
 | 模型 | 大小 | 来源 |
 |------|------|------|
 | yolo11n-coco | 10.4MB | [ultralytics 官方 ONNX](https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.onnx) |
-| fire-smoke-v1 | 42.7MB | [项目 GitHub Releases](https://github.com/KevinLiss/ApeAdmin/releases)（随版本发布附件） |
+| fire-smoke-v1 | 42.7MB | [本项目 Release v0.2.0 附件](https://github.com/KevinLiss/Apeadmin-Algorithm-Platform/releases/download/v0.2.0/fire-smoke-v1.onnx) |
 
 手动下载后放置到 `backend/src/plugins/builtin/ai_vision/assets/models/`，然后重跑方式一的脚本（或「运行环境」页的校验功能）确认 SHA256 通过。
 

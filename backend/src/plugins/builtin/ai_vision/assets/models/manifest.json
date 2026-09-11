@@ -34,7 +34,8 @@
       "input_size": 640,
       "quantized": false,
       "source": "builtin",
-      "manual_url": "https://github.com/Abonia1/YOLOv8-Fire-and-Smoke-Detection",
+      "url": "https://github.com/KevinLiss/Apeadmin-Algorithm-Platform/releases/download/v0.2.0/fire-smoke-v1.onnx",
+      "manual_url": "https://github.com/KevinLiss/Apeadmin-Algorithm-Platform/releases",
       "license_note": "开源 fire-smoke 检测权重（YOLOv8s 结构，3 类 Fire/default/smoke，已剔除 default 标注垃圾类）导出 ONNX。来源: https://github.com/Abonia1/YOLOv8-Fire-and-Smoke-Detection。AGPL-3.0，商用前需评估。",
       "description": "明火+烟雾检测（一期明火/烟雾事件使用）",
       "classes": ["fire", "smoke"]
