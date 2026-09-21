@@ -261,19 +261,24 @@ async def restart_server(
     """
     import asyncio
     import stat
+    import subprocess
 
     project_root = Path(__file__).resolve().parents[2]  # backend/
     python_bin = sys.executable
+    is_windows = os.name == "nt"
 
-    # ---- Detect systemd-managed service (production) ----
-    detect = await asyncio.create_subprocess_exec(
-        "bash", "-c",
-        "command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q apeadmin && echo systemd || echo direct",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    out, _ = await detect.communicate()
-    managed_by_systemd = (out.decode().strip() == "systemd")
+    # ---- Detect systemd-managed service (production, Linux only) ----
+    if is_windows:
+        managed_by_systemd = False
+    else:
+        detect = await asyncio.create_subprocess_exec(
+            "bash", "-c",
+            "command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q apeadmin && echo systemd || echo direct",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await detect.communicate()
+        managed_by_systemd = (out.decode().strip() == "systemd")
 
     if managed_by_systemd:
         restart_script = Path(tempfile.gettempdir()) / "apeadmin_systemd_restart.sh"
@@ -281,6 +286,16 @@ async def restart_server(
 # ApeAdmin systemd-managed restart
 sleep 2
 systemctl restart apeadmin
+"""
+    elif is_windows:
+        # Windows: batch script waits for the old process to exit, then relaunches uvicorn
+        restart_script = Path(tempfile.gettempdir()) / "apeadmin_restart.bat"
+        win_log = Path(tempfile.gettempdir()) / "apeadmin_backend.log"
+        script_content = f"""@echo off
+rem ApeAdmin auto-restart script (Windows, no service manager)
+timeout /t 2 /nobreak >nul
+cd /d "{project_root}"
+"{python_bin}" -m uvicorn src.main:app --host 127.0.0.1 --port 8000 >> "{win_log}" 2>&1
 """
     else:
         # Fallback: direct uvicorn relaunch
@@ -297,16 +312,28 @@ cd "{project_root}"
 exec "{python_bin}" -m uvicorn src.main:app --host 127.0.0.1 --port 8000 </dev/null >> /tmp/apeadmin_backend.log 2>&1
 """
     restart_script.write_text(script_content)
-    restart_script.chmod(restart_script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    if not is_windows:
+        restart_script.chmod(restart_script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
     # Spawn the restart script as a detached process
-    proc = await asyncio.create_subprocess_exec(
-        "bash", str(restart_script),
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-        start_new_session=True,  # Detach from parent process group
-    )
+    if is_windows:
+        # DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP: survive parent exit
+        detach_flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        proc = await asyncio.create_subprocess_exec(
+            "cmd", "/c", str(restart_script),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            creationflags=detach_flags,
+        )
+    else:
+        proc = await asyncio.create_subprocess_exec(
+            "bash", str(restart_script),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,  # Detach from parent process group
+        )
     logger = __import__("loguru").logger
     logger.info(f"Restart script spawned (pid={proc.pid}, mode={'systemd' if managed_by_systemd else 'direct'}), shutting down in 1s...")
 

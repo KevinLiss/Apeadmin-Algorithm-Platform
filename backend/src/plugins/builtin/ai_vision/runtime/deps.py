@@ -211,12 +211,13 @@ def install_layer(layer: str, pip_index: str | None = None) -> dict:
         raise FileNotFoundError(f"依赖清单不存在: {req}")
 
     # 构建 pip 命令：基础 -r requirements + 可配 index
+    # 注意：用 --extra-index-url（在 PyPI 基础上追加源）而非 --index-url（替换源），
+    # 否则 pytorch 源上不存在包（如 ultralytics）会导致整体安装失败。
     cmd = [sys.executable, "-m", "pip", "install", "-r", str(req)]
     env = os.environ.copy()
     index_url = pip_index or cfg.get("pip_index") or env.get("PIP_INDEX_URL")
     if index_url:
-        cmd += ["--index-url", index_url]
-        env["PIP_INDEX_URL"] = index_url
+        cmd += ["--extra-index-url", index_url]
 
     # 清空旧日志（新任务从空开始）
     from src.plugins.builtin.ai_vision.models import AIVisionRuntimeStatus

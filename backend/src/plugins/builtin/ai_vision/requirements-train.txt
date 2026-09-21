@@ -1,6 +1,6 @@
 # AI 视觉平台 L2 训练层（可选，追加约 147MB）
 # 注意：ultralytics 为 AGPL-3.0，仅训练层使用；推理层已用 ONNX 隔离
-# 安装时自动追加 --index-url https://download.pytorch.org/whl/cpu（见 runtime/deps.py）
+# 安装时自动追加 --extra-index-url https://download.pytorch.org/whl/cpu（见 runtime/deps.py）
 torch>=2.2.0
 torchvision>=0.17.0
 ultralytics>=8.2.0
