@@ -1,7 +1,7 @@
 <template>
   <div class="category-page">
-    <!-- Hero 区：插画 + 引导文案 -->
-    <div class="hero">
+    <!-- Hero 区：插画 + 引导文案（嵌入页签时隐藏） -->
+    <div class="hero" v-if="!embedded">
       <div class="hero-text">
         <h2>类别库</h2>
         <p class="text-muted">定义 AI 视觉要识别的目标类别。内置类别（人/车/明火/烟雾）开箱即用，也可按业务新增自定义类别</p>
@@ -121,6 +121,7 @@
 </template>
 
 <script setup lang="ts">
+defineProps<{ embedded?: boolean }>()
 import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {

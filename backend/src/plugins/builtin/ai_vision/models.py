@@ -199,6 +199,9 @@ class AIVisionAlarm(IDMixin, TimestampMixin, Base):
     category_code: Mapped[str] = mapped_column(String(50), comment="命中类别")
     confidence: Mapped[float] = mapped_column(Float, default=0.0, comment="置信度")
     snapshot_path: Mapped[str] = mapped_column(String(500), default="", comment="抓拍图路径")
+    video_ts: Mapped[float] = mapped_column(
+        Float, default=0.0, comment="视频源告警时刻的播放位置(秒)；RTSP 源为 0"
+    )
     level: Mapped[str] = mapped_column(
         String(20), default="warning", comment="info/warning/critical"
     )

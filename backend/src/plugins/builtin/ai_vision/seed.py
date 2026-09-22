@@ -42,6 +42,9 @@ async def _seed_menus(db: AsyncSession) -> None:
         logger.info("Created 'AI 视觉平台' top-level menu")
 
     # (name, parent_name, type, path, component, permission, icon, sort)
+    # 页面归并一期：新增「实时监控台」（任务+告警）与「规则配置」（事件+类别库），
+    # 旧 4 页（识别事件/任务编排/告警中心/类别库）保留权限但隐藏菜单（visible=0），
+    # 页面组件被新页以 embedded 方式复用，深链路由仍可访问。
     menu_specs = [
         ("统计看板", "AI 视觉平台", "C", "dashboard", "ai_vision/dashboard/index", "ai_vision:dashboard:list", "DataAnalysis", 1),
         ("运行环境", "AI 视觉平台", "C", "runtime-env", "ai_vision/runtime-env/index", "ai_vision:runtime:list", "Cpu", 2),
@@ -49,7 +52,9 @@ async def _seed_menus(db: AsyncSession) -> None:
         ("卸载依赖", "运行环境", "F", None, None, "ai_vision:runtime:uninstall", None, 2),
         ("环境自检", "运行环境", "F", None, None, "ai_vision:runtime:test", None, 3),
         ("环境文件管理", "运行环境", "F", None, None, "ai_vision:model:manage", None, 4),
-        ("摄像头管理", "AI 视觉平台", "C", "cameras", "ai_vision/cameras/index", "ai_vision:camera:list", "VideoCamera", 3),
+        ("实时监控台", "AI 视觉平台", "C", "monitor", "ai_vision/monitor/index", "ai_vision:alarm:list", "Monitor", 3),
+        ("规则配置", "AI 视觉平台", "C", "rule-config", "ai_vision/rule-config/index", "ai_vision:event:list", "Setting", 4),
+        ("摄像头管理", "AI 视觉平台", "C", "cameras", "ai_vision/cameras/index", "ai_vision:camera:list", "VideoCamera", 5),
         ("新增摄像头", "摄像头管理", "F", None, None, "ai_vision:camera:create", None, 1),
         ("编辑摄像头", "摄像头管理", "F", None, None, "ai_vision:camera:edit", None, 2),
         ("删除摄像头", "摄像头管理", "F", None, None, "ai_vision:camera:delete", None, 3),
@@ -69,7 +74,7 @@ async def _seed_menus(db: AsyncSession) -> None:
         ("启停任务", "任务编排", "F", None, None, "ai_vision:task:control", None, 4),
         ("告警中心", "AI 视觉平台", "C", "alarms", "ai_vision/alarms/index", "ai_vision:alarm:list", "Bell", 7),
         ("处理告警", "告警中心", "F", None, None, "ai_vision:alarm:edit", None, 1),
-        ("样本库", "AI 视觉平台", "C", "samples", "ai_vision/samples/index", "ai_vision:sample:list", "Picture", 8),
+        ("样本库", "AI 视觉平台", "C", "samples", "ai_vision/samples/index", "ai_vision:sample:list", "Picture", 6),
         ("上传样本", "样本库", "F", None, None, "ai_vision:sample:create", None, 1),
         ("删除样本", "样本库", "F", None, None, "ai_vision:sample:delete", None, 2),
     ]
@@ -82,7 +87,7 @@ async def _seed_menus(db: AsyncSession) -> None:
         if not parent_menu:
             logger.warning(f"Skip menu '{name}': parent '{parent_name}' not found")
             continue
-        dup = any(m.name == name and m.parent_id == parent_menu.id for m in existing)
+        dup = next((m for m in existing if m.name == name and m.parent_id == parent_menu.id), None)
         if dup:
             continue
         menu = Menu(
@@ -104,6 +109,26 @@ async def _seed_menus(db: AsyncSession) -> None:
 
     if created_menus:
         logger.info(f"Created {len(created_menus)} ai_vision menus")
+
+    # ── 页面归并迁移（幂等）：隐藏被归并的旧 4 页菜单 ──
+    # 保留 status=1（权限字符串继续生效，embedded 组件与深链路由可用），
+    # 仅 visible=0（侧边栏不显示）。重复执行无副作用。
+    merged_hidden = {"识别事件", "任务编排", "告警中心", "类别库"}
+    # 可见菜单排序归一：监控台(3) → 规则配置(4) → 摄像头(5) → 样本库(6)
+    sort_norm = {"实时监控台": 3, "规则配置": 4, "摄像头管理": 5, "样本库": 6}
+    changed = 0
+    for m in existing:
+        if m.parent_id != parent.id:
+            continue
+        if m.name in merged_hidden and m.type == "C" and m.visible != 0:
+            m.visible = 0
+            changed += 1
+        if m.name in sort_norm and m.sort != sort_norm[m.name]:
+            m.sort = sort_norm[m.name]
+            changed += 1
+    if changed:
+        await db.flush()
+        logger.info(f"[AIVision] menu merge migration: {changed} menu(s) updated")
 
     # 绑定 admin 角色
     admin_role = (await db.execute(select(Role).where(Role.code == "admin"))).scalar_one_or_none()

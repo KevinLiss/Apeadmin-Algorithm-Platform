@@ -1,6 +1,6 @@
 <template>
   <div class="alarm-page">
-    <div class="page-header">
+    <div class="page-header" v-if="!embedded">
       <h2>告警中心</h2>
       <p class="text-muted">查看识别告警与抓拍图，支持确认、标记误报、转样本和批量处理</p>
     </div>
@@ -79,11 +79,12 @@
         </template>
       </el-table-column>
       <el-table-column prop="created_at" label="告警时间" width="170" />
-      <el-table-column label="操作" width="210" fixed="right">
+      <el-table-column label="操作" width="250" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="handleAck(row)" v-if="row.status === 'pending'" v-permission="'ai_vision:alarm:edit'">确认</el-button>
           <el-button link type="warning" size="small" @click="handleFalsePositive(row)" v-if="['pending', 'acknowledged'].includes(row.status)" v-permission="'ai_vision:alarm:edit'">误报</el-button>
           <el-button link type="success" size="small" @click="handleToSample(row)" v-if="row.status === 'false_positive' || row.status === 'acknowledged'" v-permission="'ai_vision:alarm:edit'">转样本</el-button>
+          <el-button link type="danger" size="small" @click="handleDelete(row)" v-permission="'ai_vision:alarm:edit'">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -91,8 +92,8 @@
     <!-- 空状态引导 -->
     <el-empty v-if="!loading && total === 0" description="还没有告警" :image-size="120">
       <p class="empty-tip">告警会在识别任务运行后自动产生，快去检查任务是否在运行</p>
-      <el-button type="primary" @click="goTasks">
-        <el-icon><ArrowRight /></el-icon> 前往任务编排
+      <el-button v-if="!embedded" type="primary" @click="goTasks">
+        <el-icon><ArrowRight /></el-icon> 前往实时监控台
       </el-button>
     </el-empty>
 
@@ -112,6 +113,7 @@
 </template>
 
 <script setup lang="ts">
+defineProps<{ embedded?: boolean }>()
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, ArrowRight } from '@element-plus/icons-vue'
@@ -193,7 +195,7 @@ function handleFilterChange() {
 }
 
 function goTasks() {
-  router.push('/ai-vision/tasks')
+  router.push('/ai-vision/monitor?tab=live')
 }
 
 async function handleAck(row: any) {
@@ -221,6 +223,21 @@ async function handleToSample(row: any) {
   await ElMessageBox.confirm('将该告警抓拍图转入样本库？', '提示', { type: 'info' })
   await request.post(`/ai-vision/alarms/${row.id}/to-sample`)
   ElMessage.success('已转样本')
+  await fetchList()
+}
+
+async function handleDelete(row: any) {
+  try {
+    await ElMessageBox.confirm(`确定删除告警 #${row.id}？抓拍图将一并删除，且不可恢复。`, '删除告警', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      confirmButtonClass: 'el-button--danger',
+    })
+  } catch {
+    return // cancel
+  }
+  await request.delete(`/ai-vision/alarms/${row.id}`)
+  ElMessage.success('已删除')
   await fetchList()
 }
 

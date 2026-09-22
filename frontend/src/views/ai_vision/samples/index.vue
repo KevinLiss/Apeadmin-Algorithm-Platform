@@ -177,7 +177,7 @@ function handleFilterChange() {
 }
 
 function goAlarms() {
-  router.push('/ai-vision/alarms')
+  router.push('/ai-vision/monitor?tab=records')
 }
 
 function handleFileChange(file: UploadFile, files: UploadFiles) {

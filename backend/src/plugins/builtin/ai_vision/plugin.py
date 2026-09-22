@@ -85,10 +85,44 @@ class AIVisionPlugin(PluginInterface):
                 )
             )
 
+        # 轻量列迁移：create_all 不会给已存在的表补新列（如 video_ts），
+        # 每次启动幂等检查并 ALTER TABLE ADD COLUMN（SQLite/MySQL 通用）。
+        await self._ensure_schema_columns()
+
         async with SessionLocal() as db:
             await seed_ai_vision_data(db)
             await db.commit()
         logger.info("[AIVision] installed — 10 tables ready, menus + categories seeded")
+
+    async def _ensure_schema_columns(self) -> None:
+        """幂等补列：对比 ORM 元数据与实际表结构，缺失列用 ALTER TABLE 补齐。
+
+        目前覆盖：ai_vision_alarms.video_ts（监控台一期新增）。
+        只处理"加列"，不做删列/改类型（SQLite 不支持，且无此需求）。
+        """
+        from sqlalchemy import inspect, text
+
+        from src.db import engine
+
+        # (表名, 列名, DDL 片段)
+        required = [
+            ("ai_vision_alarms", "video_ts", "FLOAT DEFAULT 0"),
+        ]
+        try:
+            async with engine.begin() as conn:
+                for table, column, ddl in required:
+                    def _columns(sync_conn, _t=table):
+                        return {c["name"] for c in inspect(sync_conn).get_columns(_t)}
+
+                    cols = await conn.run_sync(_columns)
+                    if column not in cols:
+                        await conn.execute(
+                            text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+                        )
+                        logger.info(f"[AIVision] schema migrated: {table}.{column} added")
+        except Exception as exc:  # noqa: BLE001
+            # 补列失败不阻断插件安装（老库缺列时告警插入才会报错，日志可定位）
+            logger.warning(f"[AIVision] schema column migration failed: {exc}")
 
     # ── 生命周期：卸载（清理）────────────────────────
     async def uninstall(self) -> None:

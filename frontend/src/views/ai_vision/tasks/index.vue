@@ -1,6 +1,6 @@
 <template>
   <div class="task-page">
-    <div class="page-header">
+    <div class="page-header" v-if="!embedded">
       <h2>任务编排</h2>
       <p class="text-muted">把"视频源 × 识别事件"绑定为分析任务；同摄像头多任务共享一路视频流，单机上限 4 路</p>
     </div>
@@ -44,11 +44,10 @@
       <el-table-column prop="started_at" label="启动时间" width="170">
         <template #default="{ row }">{{ row.started_at || '—' }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="230" fixed="right">
+      <el-table-column label="操作" width="200" fixed="right">
         <template #default="{ row }">
-          <el-button v-if="row.status === 'running'" link type="warning" size="small" @click="handleStop(row)" :loading="actingId === row.id" v-permission="'ai_vision:task:control'">停止</el-button>
-          <el-button v-else link type="success" size="small" @click="handleStart(row)" :loading="actingId === row.id" v-permission="'ai_vision:task:control'">启动</el-button>
           <el-button link type="primary" size="small" @click="openStats(row)" v-permission="'ai_vision:task:list'">详情</el-button>
+          <el-button link type="warning" size="small" @click="handleStop(row)" v-if="row.status === 'running'" :loading="actingId === row.id" v-permission="'ai_vision:task:control'">停止</el-button>
           <el-button link type="danger" size="small" @click="handleDelete(row)" v-permission="'ai_vision:task:delete'">删除</el-button>
         </template>
       </el-table-column>
@@ -56,10 +55,10 @@
 
     <!-- 空状态引导 -->
     <el-empty v-if="!loading && total === 0" description="还没有分析任务" :image-size="120">
-      <p class="empty-tip">第三步：把视频源和识别事件绑定为任务并启动，开始智能识别</p>
+      <p class="empty-tip">第三步：把视频源和识别事件绑定为任务，然后到「实时监控」页开始监控</p>
       <div class="empty-actions">
         <el-button @click="goPage('/ai-vision/cameras')">先建视频源</el-button>
-        <el-button v-if="events.length === 0" @click="goPage('/ai-vision/events')">先建识别事件</el-button>
+        <el-button v-if="events.length === 0" @click="goPage('/ai-vision/rule-config')">先建识别事件</el-button>
         <el-button type="primary" @click="openCreate" v-permission="'ai_vision:task:create'">
           <el-icon><Plus /></el-icon> 新建任务
         </el-button>
@@ -133,7 +132,7 @@
           <el-descriptions-item label="最近告警时间" :span="2">{{ currentStats.live?.last_alarm_at || '—' }}</el-descriptions-item>
         </el-descriptions>
         <div class="stats-footer">
-          <el-button type="primary" size="small" @click="goPage('/ai-vision/alarms')">查看告警中心</el-button>
+          <el-button type="primary" size="small" @click="goPage('/ai-vision/monitor?tab=records')">查看告警记录</el-button>
           <el-text size="small" type="info">丢帧率高 = CPU 跟不上，可降低分析帧率</el-text>
         </div>
       </template>
@@ -142,6 +141,7 @@
 </template>
 
 <script setup lang="ts">
+defineProps<{ embedded?: boolean }>()
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -257,39 +257,13 @@ async function handleSave() {
       event_id: form.event_id,
       analyze_fps: form.analyze_fps,
     })
-    ElMessage.success('任务创建成功，可在列表中启动')
+    ElMessage.success('任务创建成功，可在「实时监控」页开始监控')
     dialogVisible.value = false
     await fetchList()
   } catch {
     // handled by interceptor
   } finally {
     saving.value = false
-  }
-}
-
-async function handleStart(row: any) {
-  actingId.value = row.id
-  try {
-    await request.post(`/ai-vision/tasks/${row.id}/start`)
-    ElMessage.success('任务已启动')
-    await fetchList()
-  } catch {
-    // handled by interceptor
-  } finally {
-    actingId.value = null
-  }
-}
-
-async function handleStop(row: any) {
-  actingId.value = row.id
-  try {
-    await request.post(`/ai-vision/tasks/${row.id}/stop`)
-    ElMessage.success('任务已停止')
-    await fetchList()
-  } catch {
-    // handled by interceptor
-  } finally {
-    actingId.value = null
   }
 }
 
@@ -301,6 +275,24 @@ async function openStats(row: any) {
     currentStats.value = res
   } catch {
     statsVisible.value = false
+  }
+}
+
+async function handleStop(row: any) {
+  try {
+    await ElMessageBox.confirm(`确定停止任务「#${row.id} ${row.camera_name || ''} × ${row.event_name || ''}」吗？`, '提示', { type: 'warning' })
+  } catch {
+    return // 取消
+  }
+  actingId.value = row.id
+  try {
+    await request.post(`/ai-vision/tasks/${row.id}/stop`)
+    ElMessage.success('任务已停止')
+    await fetchList()
+  } catch {
+    // handled by interceptor
+  } finally {
+    actingId.value = null
   }
 }
 

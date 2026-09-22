@@ -209,6 +209,27 @@ async def alarm_to_sample(
     return success_response(data=_sample_out(sample), msg="已转样本")
 
 
+@router.delete("/{alarm_id}")
+async def delete_alarm(
+    alarm_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+    _perm: Annotated[User, Depends(_require_perm("ai_vision:alarm:edit"))],
+):
+    """删除告警记录（连带删除其抓拍图文件；转样本的副本不受影响）。"""
+    item = await _get_alarm_or_404(db, alarm_id)
+    if item.snapshot_path:
+        try:
+            snap = Path(item.snapshot_path)
+            if snap.exists():
+                snap.unlink()
+        except OSError:
+            pass  # 文件删除失败不阻塞记录删除
+    await db.delete(item)
+    await db.commit()
+    return success_response(msg="告警删除成功")
+
+
 @router.post("/batch-ack")
 async def batch_ack(
     db: Annotated[AsyncSession, Depends(get_db)],

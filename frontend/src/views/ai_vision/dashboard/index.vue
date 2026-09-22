@@ -45,7 +45,7 @@
               v-if="!hasTask"
               type="primary"
               :disabled="!envInstalled"
-              @click="go('/ai-vision/tasks')"
+              @click="go('/ai-vision/monitor?tab=tasks')"
             >{{ envInstalled ? '去创建' : '先完成第 1 步' }}</el-button>
             <el-text v-else type="success" size="small">已完成</el-text>
           </el-card>
@@ -65,7 +65,7 @@
               type="primary"
               plain
               :disabled="!hasTask"
-              @click="go('/ai-vision/alarms')"
+              @click="go('/ai-vision/monitor?tab=live')"
             >{{ hasTask ? '去查看' : '先完成第 2 步' }}</el-button>
             <el-text v-else type="success" size="small">已收到告警</el-text>
           </el-card>
@@ -253,7 +253,7 @@ function go(path: string) {
 async function detect() {
   loading.value = true
   try {
-    const [rt, ov] = await Promise.all([
+    const [rt, ov]: any[] = await Promise.all([
       request.get('/ai-vision/dashboard/runtime'),
       request.get('/ai-vision/dashboard/overview'),
     ])
@@ -279,7 +279,7 @@ async function detect() {
 
 async function fetchRuntime() {
   try {
-    runtime.value = await request.get('/ai-vision/dashboard/runtime')
+    runtime.value = (await request.get('/ai-vision/dashboard/runtime')) as any
   } catch {
     // handled by interceptor
   }
@@ -287,7 +287,7 @@ async function fetchRuntime() {
 
 async function fetchOverview() {
   try {
-    overview.value = await request.get('/ai-vision/dashboard/overview')
+    overview.value = (await request.get('/ai-vision/dashboard/overview')) as any
     renderCharts()
   } catch {
     // handled by interceptor

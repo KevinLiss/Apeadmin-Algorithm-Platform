@@ -42,8 +42,9 @@ request.interceptors.response.use(
         window.location.href = '/admin/login'
       }
     } else {
-      const msg = error.response?.data?.msg || error.message || '网络错误'
-      ElMessage.error(msg)
+      // FastAPI HTTPException 的错误信息在 detail 字段；底座标准包在 msg
+      const msg = error.response?.data?.msg || error.response?.data?.detail || error.message || '网络错误'
+      ElMessage.error(typeof msg === 'string' ? msg : JSON.stringify(msg))
     }
     return Promise.reject(error)
   }

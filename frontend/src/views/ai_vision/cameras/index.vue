@@ -200,9 +200,9 @@ function statusText(s: string) {
   return s === 'online' ? '在线' : s === 'offline' ? '离线' : '未知'
 }
 
-/** 跳转任务编排并预选当前视频源 */
+/** 跳转监控台任务管理并预选当前视频源（任务页嵌入监控台 tab，共享 query） */
 function createTask(row: any) {
-  router.push({ path: '/ai-vision/tasks', query: { camera_id: row.id, camera_name: row.name } })
+  router.push({ path: '/ai-vision/monitor', query: { tab: 'tasks', camera_id: row.id, camera_name: row.name } })
 }
 
 async function fetchList() {

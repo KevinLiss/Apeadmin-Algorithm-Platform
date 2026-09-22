@@ -22,6 +22,7 @@ from src.plugins.builtin.ai_vision.api.dashboard import router as dashboard_rout
 from src.plugins.builtin.ai_vision.api.env_files import router as env_files_router
 from src.plugins.builtin.ai_vision.api.events import router as events_router
 from src.plugins.builtin.ai_vision.api.models import router as models_router
+from src.plugins.builtin.ai_vision.api.monitor import router as monitor_router
 from src.plugins.builtin.ai_vision.api.runtime_env import router as runtime_env_router
 from src.plugins.builtin.ai_vision.api.samples import router as samples_router
 from src.plugins.builtin.ai_vision.api.tasks import router as tasks_router
@@ -38,6 +39,7 @@ router.include_router(dashboard_router)
 router.include_router(env_files_router)
 router.include_router(events_router)
 router.include_router(models_router)
+router.include_router(monitor_router)
 router.include_router(runtime_env_router)
 router.include_router(samples_router)
 router.include_router(tasks_router)
