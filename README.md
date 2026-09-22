@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: 'a8eb6e97-173b-49b3-baef-68e27da78c2b'
-  PropagateID: 'a8eb6e97-173b-49b3-baef-68e27da78c2b'
-  ReservedCode1: '0d3a1879-5c07-4f6c-aa12-3d314a99fa15'
-  ReservedCode2: '0d3a1879-5c07-4f6c-aa12-3d314a99fa15'
+  ProduceID: '6e509970-6e23-464c-9221-e29eafa4432e'
+  PropagateID: '6e509970-6e23-464c-9221-e29eafa4432e'
+  ReservedCode1: 'ffc996c8-e97f-43c8-8895-d39cbce9b28b'
+  ReservedCode2: 'ffc996c8-e97f-43c8-8895-d39cbce9b28b'
 ---
 
 <div align="center">
@@ -83,7 +83,7 @@ ApeAdmin Algorithm Platform 是一个开箱即用的 **AI 视觉算法管理平�
 
 #### 演示视频
 
-<video src="assets/videos/ai_vision_demo.mp4" controls width="100%" poster="assets/screenshots/ai_vision/dashboard.png"></video>
+![平台演示视频](assets/videos/ai_vision_demo.mp4)
 
 > 完整演示：从视频源接入、任务编排、实时识别到告警抓拍的端到端运行效果（3.7MB，可下载到本地播放）。
 
