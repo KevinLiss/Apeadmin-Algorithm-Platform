@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: 'ba32318a-0004-4410-999e-30254d28d5bb'
-  PropagateID: 'ba32318a-0004-4410-999e-30254d28d5bb'
-  ReservedCode1: 'bc14c706-633a-4aae-9d4c-6ff335c56410'
-  ReservedCode2: 'bc14c706-633a-4aae-9d4c-6ff335c56410'
+  ProduceID: 'a8eb6e97-173b-49b3-baef-68e27da78c2b'
+  PropagateID: 'a8eb6e97-173b-49b3-baef-68e27da78c2b'
+  ReservedCode1: '0d3a1879-5c07-4f6c-aa12-3d314a99fa15'
+  ReservedCode2: '0d3a1879-5c07-4f6c-aa12-3d314a99fa15'
 ---
 
 <div align="center">
@@ -80,6 +80,12 @@ ApeAdmin Algorithm Platform 是一个开箱即用的 **AI 视觉算法管理平�
 </table>
 
 后台共 8 个业务页面：**仪表盘 / 类别库 / 识别事件 / 任务编排 / 告警中心 / 视频源 / 样本库 / 运行环境**，菜单随插件安装自动挂载，权限走底座 RBAC。
+
+#### 演示视频
+
+<video src="assets/videos/ai_vision_demo.mp4" controls width="100%" poster="assets/screenshots/ai_vision/dashboard.png"></video>
+
+> 完整演示：从视频源接入、任务编排、实时识别到告警抓拍的端到端运行效果（3.7MB，可下载到本地播放）。
 
 ## 快速开始
 
