@@ -88,6 +88,13 @@ class EventRule(BaseModel):
     fps: int = Field(default=2, ge=1, le=10, description="分析帧率")
     roi: list[list[float]] = Field(default_factory=list, description="ROI 多边形 [[x,y],...] 空=全图")
     schedule: list[dict[str, Any]] = Field(default_factory=list, description="时间计划 [{start,end},...]")
+    # ── 动作识别（diving 跳水判定器，需绑定 pose 模型）──
+    detector: str = Field(default="object", description="判定方式：object=目标检测 / diving=跳水动作识别")
+    angle_thr: float = Field(default=55.0, ge=10.0, le=90.0, description="躯干倾角阈值(度)")
+    min_air_seconds: float = Field(default=0.4, ge=0.0, le=5.0, description="最短腾空时长(秒)")
+    miss_seconds: float = Field(default=0.8, ge=0.0, le=10.0, description="入水判定消失时长(秒)")
+    max_air_seconds: float = Field(default=4.0, ge=1.0, le=30.0, description="腾空状态超时重置(秒)")
+    descent_frac: float = Field(default=0.2, ge=0.0, le=1.0, description="入水下落确认比例(画面高占比)，0=禁用")
 
 
 class EventCreate(BaseModel):
@@ -169,6 +176,7 @@ class AlarmOut(BaseModel):
     category_code: str
     confidence: float
     snapshot_path: str
+    video_ts: float = 0.0
     level: str
     status: str
     ack_by: int | None

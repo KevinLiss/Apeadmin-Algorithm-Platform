@@ -48,6 +48,21 @@ class Detection:
 
 
 @dataclass(slots=True)
+class PoseDetection:
+    """单目标姿态检测结果（原图坐标）。
+
+    keypoints: 17 项 COCO 关键点 ``[[x, y, conf], ...]``；
+    conf < kpt_thr 的点坐标仍有效但可信度低，调用方自行过滤。
+    """
+
+    bbox: list[float]  # [x1, y1, x2, y2]
+    conf: float
+    cls_id: int
+    cls_name: str
+    keypoints: list[list[float]]  # (17, 3)
+
+
+@dataclass(slots=True)
 class ModelHandle:
     """已加载的 ONNX 模型（会话 + 元数据）。"""
 
@@ -60,6 +75,10 @@ class ModelHandle:
     file_path: str
     mtime_ns: int
     size: int
+    # pose 模型专属：关键点形状 (nk, kd)，从 ONNX 元数据 kpt_shape 读取；
+    # 检测模型为默认 (17, 3) 但不会被使用（detect_pose 校验 task=="pose"）
+    kpt_shape: tuple[int, int] = (17, 3)
+    is_pose: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +204,31 @@ class InferenceEngine:
         except Exception:  # noqa: BLE001
             pass
 
+        # pose 模型探测：ultralytics 导出时写入 task/kpt_shape 元数据；
+        # 无元数据时按输出列数推断（4+nc+nk*kd，nk=17/kd=3 时列数 = 56+nc）
+        kpt_shape = (17, 3)
+        is_pose = False
+        try:
+            meta = session.get_modelmeta().custom_metadata_map or {}
+            if str(meta.get("task", "")).lower() == "pose":
+                is_pose = True
+                ks_raw = meta.get("kpt_shape")
+                if ks_raw:
+                    import json as _json
+
+                    ks = _json.loads(ks_raw)
+                    if isinstance(ks, (list, tuple)) and len(ks) == 2:
+                        kpt_shape = (int(ks[0]), int(ks[1]))
+            if not is_pose:
+                out_dim = int(session.get_outputs()[0].shape[1])
+                if out_dim >= 4 + 17 * 3 + 1:  # 56 列起（nc≥1）→ 疑似 pose
+                    remainder = out_dim - 4 - 1
+                    if remainder % (17 * 3) == 0:
+                        is_pose = True
+                        kpt_shape = (17, 3)
+        except Exception:  # noqa: BLE001
+            pass
+
         # 缺省类别映射：id → 自身编码
         if not category_map:
             # 从 names 推导；无 names 时用 str(id)
@@ -198,6 +242,8 @@ class InferenceEngine:
             file_path=str(path),
             mtime_ns=stat.st_mtime_ns,
             size=stat.st_size,
+            kpt_shape=kpt_shape,
+            is_pose=is_pose,
         )
 
     # ── 推理 ──────────────────────────────────────────────
@@ -268,6 +314,83 @@ class InferenceEngine:
                     conf=d["conf"],
                     cls_id=cid,
                     cls_name=handle.category_map.get(cid, str(cid)),
+                )
+            )
+        return results
+
+    # ── 姿态推理 ────────────────────────────────────────────
+    def detect_pose(
+        self,
+        frame_bgr: Any,
+        handle: ModelHandle,
+        threshold: float = 0.35,
+        classes_filter: set[int] | None = None,
+        iou_thr: float = 0.45,
+    ) -> list[PoseDetection]:
+        """对单帧 BGR 图像执行姿态检测（yolo11-pose 系 ONNX）。
+
+        与 :meth:`detect` 相同的预处理/逆变换流程，额外解码 17 个
+        关键点（原图坐标 + 每点置信度）。
+
+        Args:
+            frame_bgr: OpenCV BGR 图像（numpy uint8）。
+            handle: :meth:`load` 返回的模型句柄（须为 pose 模型）。
+            threshold: 目标置信度阈值（pose 建议 0.3~0.4）。
+            classes_filter: 仅保留这些模型类别 ID（None = 全部）。
+            iou_thr: NMS IoU 阈值。
+
+        Returns:
+            :class:`PoseDetection` 列表（按置信度降序，原图坐标）。
+
+        Raises:
+            ValueError: handle 不是 pose 模型。
+        """
+        ensure_infer_runtime()
+        import numpy as np
+
+        from src.plugins.builtin.ai_vision.runtime.yolo_postprocess import (
+            letterbox,
+            postprocess_pose,
+        )
+
+        if not handle.is_pose:
+            raise ValueError(f"模型 {handle.file_path} 不是 pose 模型，无法执行姿态推理")
+
+        h, w = frame_bgr.shape[:2]
+        input_size = handle.input_size
+
+        img, ratio, pad, _ = letterbox(frame_bgr, (input_size, input_size))
+        img = img[:, :, ::-1]
+        img = np.ascontiguousarray(img.transpose(2, 0, 1)).astype(np.float32) / 255.0
+        tensor = img[None, ...]
+
+        session = handle.session
+        input_name = session.get_inputs()[0].name
+        output = session.run(None, {input_name: tensor})[0]
+
+        dets = postprocess_pose(
+            output,
+            orig_shape=(h, w),
+            pad=pad,
+            ratio=ratio,
+            class_names=handle.names,
+            conf_thr=threshold,
+            iou_thr=iou_thr,
+            kpt_shape=handle.kpt_shape,
+        )
+
+        results: list[PoseDetection] = []
+        for d in dets:
+            cid = d["cls_id"]
+            if classes_filter is not None and cid not in classes_filter:
+                continue
+            results.append(
+                PoseDetection(
+                    bbox=d["bbox"],
+                    conf=d["conf"],
+                    cls_id=cid,
+                    cls_name=handle.category_map.get(cid, str(cid)),
+                    keypoints=d["keypoints"],
                 )
             )
         return results

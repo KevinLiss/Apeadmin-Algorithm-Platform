@@ -39,6 +39,42 @@
       "license_note": "开源 fire-smoke 检测权重（YOLOv8s 结构，3 类 Fire/default/smoke，已剔除 default 标注垃圾类）导出 ONNX。来源: https://github.com/Abonia1/YOLOv8-Fire-and-Smoke-Detection。AGPL-3.0，商用前需评估。",
       "description": "明火+烟雾检测（一期明火/烟雾事件使用）",
       "classes": ["fire", "smoke"]
+    },
+    {
+      "name": "yolo11n-pose",
+      "file": "yolo11n-pose.onnx",
+      "version": "1.0.0",
+      "sha256": "b8ad2d10fa44a17fdf9f0ab5c855d62cef65733c68cb41dab1e77e049e087937",
+      "file_size": 11811081,
+      "category_map": {
+        "0": "person"
+      },
+      "input_size": 640,
+      "quantized": false,
+      "source": "builtin",
+      "url": "https://hf-mirror.com/Ultralytics/YOLO11/resolve/main/yolo11n-pose.pt",
+      "license_note": "YOLO11n-pose 官方预训练权重（COCO person + 17 关键点）导出 ONNX（imgsz 640 / opset 17）。来源: https://github.com/ultralytics/assets (v8.3.0 yolo11n-pose.pt)，经 hf-mirror.com 下载。YOLO11 权重遵循 AGPL-3.0，商用前需评估。用于跳水等动作识别（diving 判定器）。",
+      "description": "人体姿态关键点（跳水动作识别 / diving 判定器专用）",
+      "classes": ["person"]
+    },
+    {
+      "name": "drowning-wk-v1",
+      "file": "drowning-wk-v1.onnx",
+      "version": "2.0.0",
+      "sha256": "d53117e84d4d89997cca6b70a60287be6d97f810d1933c7019c0c15eb62f8180",
+      "file_size": 10566796,
+      "category_map": {
+        "0": "swimming",
+        "1": "tread_water",
+        "2": "drowning"
+      },
+      "input_size": 640,
+      "quantized": false,
+      "source": "builtin",
+      "url": "",
+      "license_note": "基于 Wang-Kaikai/drowning-detection-dataset（GitHub，3 类 swimming/tread water/drowning）均衡子集（train 2700/val 600）在 yolo11n 上 CPU 训练 30 epochs 导出 ONNX（imgsz 640 / opset 17）。val mAP50=0.987 / mAP50-95=0.698。数据集许可未声明，商用前需确认。",
+      "description": "溺水检测（水面状态：游泳/踩水挣扎/溺水）",
+      "classes": ["swimming", "tread_water", "drowning"]
     }
   ]
 }

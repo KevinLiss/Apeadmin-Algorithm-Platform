@@ -61,7 +61,7 @@ class TaskBinding:
     model_ids: list[int]
     analyze_fps: int = 2
     status: str = "running"
-    detector: "EventDetector | None" = None  # 每个任务一个判定器实例
+    detector: "EventDetector | DivingDetector | None" = None  # 每个任务一个判定器实例
 
 
 @dataclass(slots=True)
@@ -102,14 +102,15 @@ class EventDetector:
     替换为 SlidingWindowVoter + DurationTimer + CooldownGate 完整实现。
 
     规则参数：
-    - vote_seconds: 投票窗口（秒）；0 = 单帧命中即告警
+    - vote_seconds: 投票窗口（秒）；0 = 单帧命中即告警。
+      兼容前端事件表单的 duration 字段（两者同义，vote_seconds 优先）
     - cooldown: 告警冷却（秒）
     - fps: 分析帧率（用于计算 N = ceil(fps × vote_seconds)）
     """
 
     def __init__(self, rule: dict[str, Any], fps: int) -> None:
         self.threshold = float(rule.get("threshold", 0.45))
-        self.vote_seconds = int(rule.get("vote_seconds", 0))
+        self.vote_seconds = int(rule.get("vote_seconds", rule.get("duration", 0)) or 0)
         self.cooldown = int(rule.get("cooldown", 60))
         self.fps = max(1, int(fps))
         self._hit_count = 0
@@ -134,6 +135,147 @@ class EventDetector:
         self._last_alarm_at = ts
         self._hit_count = 0
         return True
+
+
+class DivingDetector:
+    """跳水动作判定器（pose 模型 + 躯干倾角状态机）。
+
+    原理：跳水动作在低帧率（2~5fps）下表现为三段可观测特征——
+    1. **腾空**：躯干（肩中点→髋中点连线）与竖直方向夹角 ≥ angle_thr
+       （站立 ~0-20°；起跳/翻转/入水姿态 55-180°），且持续 ≥ min_air_frames；
+    2. **入水**：腾空后目标从画面中消失（水花遮挡/沉入水中）≥ miss_frames；
+    3. 满足 1→2 序列即告警，冷却期与 EventDetector 一致。
+
+    接口与 EventDetector 相同（``feed(dets, ts) -> bool``），dets 为
+    ``PoseDetection`` 列表（取置信度最高的 person 作为跟踪目标）。
+
+    规则参数（存于事件 rule JSON）：
+    - angle_thr: 躯干倾角阈值（度），默认 55
+    - min_air_seconds: 最短腾空时长（秒），默认 0.4
+    - miss_seconds: 入水判定的目标消失时长（秒），默认 0.8
+    - max_air_seconds: 腾空状态超时重置（秒），默认 4（防止弯腰等误挂状态）
+    - descent_frac: 复现确认入水的下落比例（框中心下降 ≥ 画面高×该值时，
+      即使消失未满 miss_seconds 也判定入水；0=禁用），默认 0.2
+    - cooldown: 告警冷却（秒）
+    """
+
+    # COCO 关键点索引：左/右肩 = 5/6，左/右髋 = 11/12
+    _SHOULDER = (5, 6)
+    _HIP = (11, 12)
+    _KPT_CONF_MIN = 0.3
+
+    def __init__(self, rule: dict[str, Any], fps: int) -> None:
+        self.fps = max(1, int(fps))
+        self.cooldown = int(rule.get("cooldown", 30))
+        self.angle_thr = float(rule.get("angle_thr", 55.0))
+        self.min_air_frames = max(1, int(round(float(rule.get("min_air_seconds", 0.4)) * self.fps)))
+        self.miss_frames = max(1, int(round(float(rule.get("miss_seconds", 0.8)) * self.fps)))
+        self.max_air_frames = max(2, int(round(float(rule.get("max_air_seconds", 4.0)) * self.fps)))
+        self.descent_frac = float(rule.get("descent_frac", 0.2))
+        self._state = "idle"  # idle / airborne
+        self._air_count = 0
+        self._miss_count = 0
+        self._air_start_cy = 0.0  # 进入腾空态时目标框中心 y（像素）
+        self._last_cy = 0.0  # 最近一次可见时目标框中心 y
+        self._last_alarm_at = -float("inf")  # 初始视为"从未告警"，不拦首次
+        # 供画面叠加 / 调试
+        self.last_angle: float | None = None
+        self.last_state = "idle"
+
+    def feed(self, detections: list[Any], ts: float, frame_h: int = 0) -> bool:
+        """喂入一帧 pose 检测结果，返回是否触发跳水告警。
+
+        frame_h: 帧高度（像素），用于下落比例确认；0=跳过该项确认。
+        """
+        det = max(detections, key=lambda d: d.conf) if detections else None
+        angle = self._torso_angle(det)
+        self.last_angle = angle
+        if det is not None:
+            self._last_cy = (det.bbox[1] + det.bbox[3]) / 2.0
+
+        if det is not None and angle is not None and angle >= self.angle_thr:
+            # 大倾角姿态：进入/维持腾空态
+            if self._state == "idle":
+                self._state = "airborne"
+                self._air_count = 1
+                self._air_start_cy = self._last_cy
+            else:
+                self._air_count += 1
+            self._miss_count = 0
+        elif det is not None:
+            # 目标可见但姿态直立：腾空未达标 → 复位；已达标 → 保持（等待消失确认入水）
+            if self._state == "airborne":
+                if self._air_count < self.min_air_frames:
+                    self._reset()
+                else:
+                    self._air_count += 1  # 继续累计（超时由 max_air_frames 复位）
+        else:
+            # 目标消失：仅在腾空达标后计数（入水特征）
+            if self._state == "airborne" and self._air_count >= self.min_air_frames:
+                self._miss_count += 1
+            elif self._state == "airborne":
+                self._reset()
+
+        self.last_state = self._state
+
+        # 超时复位：长时间挂起（如弯腰检修）不产生告警
+        if self._state == "airborne" and self._air_count > self.max_air_frames:
+            self._reset()
+            return False
+
+        # 告警判定：腾空达标 + 消失达标 + 下落确认 + 冷却期外
+        if (
+            self._state == "airborne"
+            and self._air_count >= self.min_air_frames
+            and self._miss_count >= self.miss_frames
+        ):
+            # 下落确认：最后可见位置应显著低于腾空起始位置（真跳入水中）；
+            # 原地被遮挡（如泳客经过挡镜头）cy 基本不变 → 拒绝
+            descended = True
+            if frame_h > 0 and self.descent_frac > 0:
+                descended = (self._last_cy - self._air_start_cy) >= self.descent_frac * frame_h
+            self._reset()
+            if not descended:
+                return False
+            if ts - self._last_alarm_at < self.cooldown:
+                return False
+            self._last_alarm_at = ts
+            return True
+        return False
+
+    def _reset(self) -> None:
+        self._state = "idle"
+        self._air_count = 0
+        self._miss_count = 0
+
+    @staticmethod
+    def _torso_angle(det: Any) -> float | None:
+        """躯干与竖直方向的夹角（度）。0=直立，90=水平，180=头朝下。
+
+        关键点置信度不足（遮挡/远景）时返回 None。
+        静态方法：供 feed() 与 worker 叠加层共用。
+        """
+        if det is None or not getattr(det, "keypoints", None):
+            return None
+        kpts = det.keypoints
+        if len(kpts) < 13:
+            return None
+        pts = [kpts[i] for i in (*DivingDetector._SHOULDER, *DivingDetector._HIP)]
+        if any(p[2] < DivingDetector._KPT_CONF_MIN for p in pts):
+            return None
+        sx = (pts[0][0] + pts[1][0]) / 2.0
+        sy = (pts[0][1] + pts[1][1]) / 2.0
+        hx = (pts[2][0] + pts[3][0]) / 2.0
+        hy = (pts[2][1] + pts[3][1]) / 2.0
+        vx, vy = sx - hx, sy - hy  # 髋→肩 向量（图像坐标 y 向下）
+        norm = (vx * vx + vy * vy) ** 0.5
+        if norm < 1e-6:
+            return None
+        # 竖直向上为 (0, -1)：cos = dot / norm
+        cos_a = max(-1.0, min(1.0, -vy / norm))
+        import math
+
+        return math.degrees(math.acos(cos_a))
 
 
 @dataclass(slots=True)
@@ -193,6 +335,7 @@ class StreamWorker:
         self.stats = WorkerStats()
         self._worker_id = f"cam-{camera_id}"
         self._video_fps = 0.0  # 视频源原始帧率（用于实时播放节流）
+        self._video_ts = 0.0  # 视频源当前播放位置（秒；RTSP 源恒 0）
 
         # 断线重连状态
         self._reconnect_delay = _RECONNECT_BASE
@@ -200,6 +343,10 @@ class StreamWorker:
         self._state = "unknown"  # unknown/online/offline
         self._last_frame: Any = None  # 最近一次成功帧（供抓拍图使用）
         self._last_frame_ts = 0.0
+        # 最近一次推理的检测框（归一化坐标），供监控台实时画面叠加画框
+        self._det_lock = threading.Lock()
+        self._last_detections: list[dict] = []
+        self._last_det_ts = 0.0
 
     # ── 任务绑定 ─────────────────────────────────────────────
     def add_task(self, task: TaskBinding) -> None:
@@ -217,6 +364,33 @@ class StreamWorker:
     def snapshot_tasks(self) -> list[TaskBinding]:
         with self._lock:
             return list(self._tasks.values())
+
+    # ── 实时帧读取（监控台 MJPEG 流用）────────────────────
+    def latest_frame(self) -> tuple[Any, float, float]:
+        """返回 (最近帧副本, 采集时刻 epoch 秒, 视频源播放位置秒)。
+
+        - 引用赋值在 GIL 下是原子的，copy 后调用方可安全跨线程使用；
+        - RTSP 源 video_ts 恒 0；
+        - 尚无帧时返回 (None, 0.0, 0.0)。
+        """
+        frame = self._last_frame
+        if frame is None:
+            return None, 0.0, 0.0
+        try:
+            return frame.copy(), self._last_frame_ts, self._video_ts
+        except Exception:  # noqa: BLE001
+            return None, 0.0, 0.0
+
+    def latest_detections(self, max_age: float = 2.5) -> list[dict]:
+        """最近一次推理的检测框（归一化坐标），供 MJPEG 流在画面上叠加画框。
+
+        每项：{x1,y1,x2,y2 (0~1), label}。超过 max_age 秒未更新（无命中/
+        任务已停止）返回空列表。
+        """
+        with self._det_lock:
+            if not self._last_detections or time.time() - self._last_det_ts > max_age:
+                return []
+            return list(self._last_detections)
 
     # ── 启停 ─────────────────────────────────────────────────
     def start(self) -> None:
@@ -315,6 +489,12 @@ class StreamWorker:
             self._mark_read_ok()
             self._last_frame = frame
             self._last_frame_ts = time.time()
+            # 视频源：记录当前播放位置（秒），供告警时间线跳转回看
+            if self.source_type == "video":
+                try:
+                    self._video_ts = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+                except Exception:  # noqa: BLE001
+                    pass
 
             # 帧率节流：按当前最大任务 fps 计算最小间隔
             target_fps = self._max_fps()
@@ -347,9 +527,12 @@ class StreamWorker:
             cap.release()
 
     def _process_frame(self, frame: Any) -> None:
-        """推理分发：模型去重 → 逐事件判定 → 告警落库。"""
+        """推理分发：模型去重 → 逐事件判定 → 告警落库 → 更新画面叠加框。"""
         tasks = self.snapshot_tasks()
         if not tasks:
+            with self._det_lock:
+                self._last_detections = []
+                self._last_det_ts = time.time()
             return
 
         # 模型去重：model_id → ModelHandle（同一摄像头多事件共享一个推理）
@@ -359,24 +542,81 @@ class StreamWorker:
                 if mid not in handles:
                     handles[mid] = self._load_model(mid)
 
+        all_boxes: list[dict] = []
         for task in tasks:
             try:
-                self._process_event(task, frame, handles)
+                all_boxes.extend(self._process_event(task, frame, handles))
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"[AIVision] task {task.task_id} frame error: {exc}")
 
-    def _process_event(self, task: TaskBinding, frame: Any, handles: dict[int, Any]) -> None:
-        """单事件处理：收集所有绑定模型的检测结果 → 过滤 → 判定 → 告警。"""
+        # 供监控台实时画面叠加画框（归一化坐标，MJPEG 编码时还原像素位置）
+        with self._det_lock:
+            self._last_detections = all_boxes
+            self._last_det_ts = time.time()
+
+    def _process_event(self, task: TaskBinding, frame: Any, handles: dict[int, Any]) -> list[dict]:
+        """单事件处理：收集所有绑定模型的检测结果 → 过滤 → 判定 → 告警。
+
+        返回本事件在当前帧上的检测框（归一化 0~1 坐标 + 标签 + 可选关键点），
+        供上层在实时画面上叠加绘制。
+
+        判定方式由 ``rule.detector`` 决定：
+        - 缺省/``object``：EventDetector（目标检测 + 投票）
+        - ``diving``：DivingDetector（pose 关键点 + 躯干倾角状态机），
+          仅对 pose 模型推理；非 pose 模型绑定会被跳过并告警日志。
+        """
         rule = task.rule or {}
         threshold = float(rule.get("threshold", 0.45))
+        mode = str(rule.get("detector", "object"))
         pp = PostProcessor(
             roi=rule.get("roi", []),
             min_size=float(rule.get("min_size", 20)),
             threshold=threshold,
         )
         if task.detector is None:
-            task.detector = EventDetector(rule, task.analyze_fps)
+            if mode == "diving":
+                task.detector = DivingDetector(rule, task.analyze_fps)
+            else:
+                task.detector = EventDetector(rule, task.analyze_fps)
 
+        fh, fw = frame.shape[:2]
+
+        # ── pose 路径：跳水动作识别 ──────────────────────────
+        if isinstance(task.detector, DivingDetector):
+            pose_handles = [
+                handles.get(mid) for mid in task.model_ids
+            ]
+            pose_handles = [h for h in pose_handles if h is not None and getattr(h, "is_pose", False)]
+            if not pose_handles and not getattr(self, "_pose_warned", False):
+                logger.warning(
+                    f"[AIVision] task {task.task_id}: diving 判定需要绑定 pose 模型（如 yolo11n-pose），当前绑定无效"
+                )
+                self._pose_warned = True
+
+            pose_dets: list[Any] = []
+            for handle in pose_handles:
+                cat_filter = {
+                    cid for cid, cat in handle.category_map.items() if cat in set(task.category_codes)
+                } or None
+                try:
+                    pose_dets.extend(
+                        self.engine.detect_pose(frame, handle, threshold=threshold, classes_filter=cat_filter)
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[AIVision] pose detect failed (task {task.task_id}): {exc}")
+
+            # ROI / 最小尺寸过滤（PoseDetection 有 bbox 属性，复用 PostProcessor）
+            pose_dets = pp.filter(pose_dets)
+
+            boxes = [
+                self._pose_box_dict(d, fw, fh)
+                for d in sorted(pose_dets, key=lambda x: x.conf, reverse=True)[:3]
+            ]
+            if task.detector.feed(pose_dets, time.time(), frame_h=fh):
+                self._raise_alarm(task, pose_dets, action_label="diving")
+            return boxes
+
+        # ── 目标检测路径（原有逻辑）─────────────────────────
         # 收集该事件关心的所有检测
         all_dets: list[Any] = []
         for mid in task.model_ids:
@@ -394,13 +634,50 @@ class StreamWorker:
 
         all_dets = pp.filter(all_dets)
 
+        # 归一化检测框（画面叠加层用）
+        boxes = [
+            {
+                "x1": max(0.0, min(1.0, d.bbox[0] / fw)),
+                "y1": max(0.0, min(1.0, d.bbox[1] / fh)),
+                "x2": max(0.0, min(1.0, d.bbox[2] / fw)),
+                "y2": max(0.0, min(1.0, d.bbox[3] / fh)),
+                "label": f"{d.cls_name} {d.conf:.2f}",
+            }
+            for d in sorted(all_dets, key=lambda x: x.conf, reverse=True)[:5]
+        ]
+
         if task.detector.feed(all_dets, time.time()):
             self._raise_alarm(task, all_dets)
+        return boxes
 
-    def _raise_alarm(self, task: TaskBinding, dets: list[Any]) -> None:
-        """告警落库 + 抓拍图 + 事件回调。"""
+    def _pose_box_dict(self, d: Any, fw: int, fh: int) -> dict:
+        """PoseDetection → 归一化叠加框（附关键点，供 MJPEG 层绘制骨架）。"""
+        angle = DivingDetector._torso_angle(d)  # 静态复用躯干角计算
+        if angle is not None:
+            angle = round(angle, 1)
+        label = f"person {d.conf:.2f}"
+        if angle is not None:
+            label = f"person {d.conf:.2f} torso:{angle}°"
+        box = {
+            "x1": max(0.0, min(1.0, d.bbox[0] / fw)),
+            "y1": max(0.0, min(1.0, d.bbox[1] / fh)),
+            "x2": max(0.0, min(1.0, d.bbox[2] / fw)),
+            "y2": max(0.0, min(1.0, d.bbox[3] / fh)),
+            "label": label,
+            "keypoints": [
+                [max(0.0, min(1.0, p[0] / fw)), max(0.0, min(1.0, p[1] / fh)), p[2]]
+                for p in (getattr(d, "keypoints", None) or [])
+            ],
+        }
+        return box
+
+    def _raise_alarm(self, task: TaskBinding, dets: list[Any], action_label: str = "") -> None:
+        """告警落库 + 抓拍图 + 事件回调 + 告警总线发布。
+
+        action_label: 动作识别结果标签（如 diving），附加到告警 note 字段。
+        """
         try:
-            snap = self._save_snapshot(task, dets)
+            snap = self._save_snapshot(task, dets, action_label=action_label)
             alarm = {
                 "task_id": task.task_id,
                 "event_id": task.event_id,
@@ -408,18 +685,39 @@ class StreamWorker:
                 "category_code": task.category_codes[0] if task.category_codes else "",
                 "confidence": round(max(d.conf for d in dets), 4) if dets else 0.0,
                 "snapshot_path": snap,
+                "video_ts": round(self._video_ts, 2),
                 "level": "warning",
                 "status": "pending",
-                "note": "",
+                "note": f"动作识别: {action_label}" if action_label else "",
             }
-            self._db_insert_alarm(alarm)
+            alarm_id = self._db_insert_alarm(alarm)
             self.stats.last_alarm_at = time.time()
-            self._emit(ALARM_RAISED, alarm)
+            # 总线快照：附加告警 ID 与视频时间戳（供监控台时间线跳转）
+            bus_payload = {
+                **alarm,
+                "alarm_id": alarm_id,
+                "video_ts": round(self._video_ts, 2),
+                "source_type": self.source_type,
+                "ts": time.time(),
+            }
+            try:
+                from src.plugins.builtin.ai_vision.runtime.alarm_bus import publish
+
+                publish(bus_payload)
+            except Exception:  # noqa: BLE001
+                pass
+            self._emit(ALARM_RAISED, bus_payload)
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[AIVision] alarm save failed: {exc}")
 
-    def _save_snapshot(self, task: TaskBinding, dets: list[Any]) -> str:
-        """画框 + 标签 → JPEG（quality 85，最多 top-3）→ 返回绝对路径。"""
+    # COCO 骨架连线（关键点索引对）：用于抓拍图/实时画面绘制
+    _SKELETON = [
+        (5, 6), (5, 7), (7, 9), (6, 8), (8, 10), (5, 11), (6, 12), (11, 12),
+        (11, 13), (13, 15), (12, 14), (14, 16),
+    ]
+
+    def _save_snapshot(self, task: TaskBinding, dets: list[Any], action_label: str = "") -> str:
+        """画框 + 标签（pose 结果附骨架）→ JPEG（quality 85，最多 top-3）→ 绝对路径。"""
         import cv2
 
         frame = self._last_frame
@@ -431,7 +729,19 @@ class StreamWorker:
             x1, y1, x2, y2 = [int(v) for v in d.bbox]
             cv2.rectangle(img, (x1, y1), (x2, y2), (0, 165, 255), 2)
             label = f"{d.cls_name} {d.conf:.2f}"
+            if action_label:
+                label = f"{action_label} {d.conf:.2f}"
             cv2.putText(img, label, (x1, max(y1 - 6, 12)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1)
+            # pose：绘制骨架
+            kpts = getattr(d, "keypoints", None)
+            if kpts and len(kpts) >= 17:
+                for a, b in self._SKELETON:
+                    pa, pb = kpts[a], kpts[b]
+                    if pa[2] >= 0.3 and pb[2] >= 0.3:
+                        cv2.line(img, (int(pa[0]), int(pa[1])), (int(pb[0]), int(pb[1])), (0, 220, 130), 2)
+                for p in kpts:
+                    if p[2] >= 0.3:
+                        cv2.circle(img, (int(p[0]), int(p[1])), 3, (0, 0, 255), -1)
 
         snap_dir = Path(self.uploads_dir) / "ai_vision" / "snapshots" / str(self.camera_id)
         snap_dir.mkdir(parents=True, exist_ok=True)
@@ -440,14 +750,17 @@ class StreamWorker:
         cv2.imwrite(str(path), img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
         return str(path)
 
-    def _db_insert_alarm(self, alarm: dict) -> None:
-        """独立同步 Session 写库（不阻塞事件循环）。"""
+    def _db_insert_alarm(self, alarm: dict) -> int | None:
+        """独立同步 Session 写库（不阻塞事件循环），返回新告警 ID。"""
         from src.plugins.builtin.ai_vision.models import AIVisionAlarm
         from src.plugins.builtin.ai_vision.runtime.syncdb import sync_session
 
         with sync_session() as db:
-            db.add(AIVisionAlarm(**alarm))
+            row = AIVisionAlarm(**alarm)
+            db.add(row)
             db.commit()
+            db.refresh(row)
+            return row.id
 
     # ── 模型加载 ─────────────────────────────────────────────
     def _load_model(self, model_id: int) -> Any | None:

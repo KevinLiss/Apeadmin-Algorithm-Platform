@@ -1,6 +1,6 @@
 <template>
   <div class="event-page">
-    <div class="page-header">
+    <div class="page-header" v-if="!embedded">
       <h2>识别事件</h2>
       <p class="text-muted">定义"看什么 + 怎么算告警"的规则包（类别 + 置信度阈值 + 绑定模型），发布后可被任务引用</p>
     </div>
@@ -18,7 +18,12 @@
     <!-- 列表 -->
     <el-table v-if="total > 0 || loading" :data="tableData" v-loading="loading" stripe style="width: 100%; margin-top: 16px">
       <el-table-column prop="id" label="ID" width="60" />
-      <el-table-column prop="name" label="事件名称" min-width="140" />
+      <el-table-column prop="name" label="事件名称" min-width="140">
+        <template #default="{ row }">
+          {{ row.name }}
+          <el-tag v-if="row.rule?.detector === 'diving'" size="small" type="warning" style="margin-left: 6px">动作识别</el-tag>
+        </template>
+      </el-table-column>
       <el-table-column label="类别" min-width="120">
         <template #default="{ row }">
           <el-tag v-for="code in row.category_codes" :key="code" size="small" class="cat-tag">{{ code }}</el-tag>
@@ -40,7 +45,11 @@
           <el-button link type="success" size="small" @click="handlePublish(row)" v-if="['draft', 'ready'].includes(row.status)" v-permission="'ai_vision:event:edit'">发布</el-button>
           <el-button link type="warning" size="small" @click="handleRetire(row)" v-if="['ready', 'paused'].includes(row.status)" v-permission="'ai_vision:event:edit'">退役</el-button>
           <el-button link type="primary" size="small" @click="createTask(row)" v-if="row.status === 'ready'" v-permission="'ai_vision:task:create'">创建任务</el-button>
-          <el-button link type="primary" size="small" @click="openEdit(row)" v-permission="'ai_vision:event:edit'">编辑</el-button>
+          <el-tooltip content="运行中的事件不可编辑，请先停止引用它的任务" :disabled="row.status !== 'running'" placement="top">
+            <span>
+              <el-button link type="primary" size="small" @click="openEdit(row)" :disabled="row.status === 'running'" v-permission="'ai_vision:event:edit'">编辑</el-button>
+            </span>
+          </el-tooltip>
           <el-button link type="danger" size="small" @click="handleDelete(row)" v-permission="'ai_vision:event:delete'">删除</el-button>
         </template>
       </el-table-column>
@@ -73,8 +82,17 @@
         <el-form-item label="事件名称" required>
           <el-input v-model="form.name" placeholder="如：吸烟识别" maxlength="200" />
         </el-form-item>
+        <el-form-item label="判定方式">
+          <el-radio-group v-model="form.rule.detector" @change="onDetectorChange">
+            <el-radio-button value="object">目标检测</el-radio-button>
+            <el-radio-button value="diving">动作识别（跳水）</el-radio-button>
+          </el-radio-group>
+          <el-text v-if="form.rule.detector === 'diving'" size="small" type="warning" style="margin-top: 4px">
+            需绑定姿态模型（yolo11n-pose），类别选择"人员"
+          </el-text>
+        </el-form-item>
         <el-form-item label="目标类别" required>
-          <el-select v-model="form.category_codes" multiple placeholder="选择要识别的目标类别" style="width: 100%">
+          <el-select v-model="form.category_codes" multiple placeholder="选择要识别的目标类别" style="width: 100%" :disabled="form.rule.detector === 'diving'">
             <el-option v-for="c in categories" :key="c.code" :label="`${c.name} (${c.code})`" :value="c.code" :disabled="c.status !== 1" />
           </el-select>
         </el-form-item>
@@ -82,19 +100,40 @@
           <el-select v-model="form.model_ids" multiple placeholder="选择检测模型（发布后不可为空）" style="width: 100%">
             <el-option v-for="m in models" :key="m.id" :label="`${m.name} v${m.version}${m.quantized ? ' (INT8)' : ''}`" :value="m.id" />
           </el-select>
-          <el-text size="small" type="info">需选择与目标类别匹配的模型</el-text>
+          <el-text size="small" type="info">{{ form.rule.detector === 'diving' ? '跳水识别必须选择 yolo11n-pose 姿态模型' : '需选择与目标类别匹配的模型' }}</el-text>
         </el-form-item>
         <el-form-item label="置信度阈值">
           <el-slider v-model="form.rule.threshold" :min="0.1" :max="0.95" :step="0.05" show-input />
         </el-form-item>
-        <el-form-item label="持续时长(s)">
-          <el-input-number v-model="form.rule.duration" :min="0" :max="300" /> <el-text size="small" type="info">0 = 单帧即告警</el-text>
-        </el-form-item>
+        <template v-if="form.rule.detector === 'object'">
+          <el-form-item label="持续时长(s)">
+            <el-input-number v-model="form.rule.duration" :min="0" :max="300" /> <el-text size="small" type="info">0 = 单帧即告警</el-text>
+          </el-form-item>
+        </template>
+        <template v-else>
+          <el-form-item label="躯干倾角(°)">
+            <el-input-number v-model="form.rule.angle_thr" :min="10" :max="90" :step="5" />
+            <el-text size="small" type="info">≥该角度视为腾空姿态（站立≈0-20°，跳水翻转 55-180°）</el-text>
+          </el-form-item>
+          <el-form-item label="最短腾空(s)">
+            <el-input-number v-model="form.rule.min_air_seconds" :min="0" :max="5" :step="0.2" :precision="1" />
+            <el-text size="small" type="info">腾空姿态需持续的最短时间，防单帧误判</el-text>
+          </el-form-item>
+          <el-form-item label="消失确认(s)">
+            <el-input-number v-model="form.rule.miss_seconds" :min="0" :max="10" :step="0.2" :precision="1" />
+            <el-text size="small" type="info">腾空后目标从画面消失多久判定为入水</el-text>
+          </el-form-item>
+          <el-form-item label="下落确认">
+            <el-slider v-model="form.rule.descent_frac" :min="0" :max="0.6" :step="0.05" show-input />
+            <el-text size="small" type="info">目标需下落≥画面高×该比例才算入水（0=不校验，遮挡场景建议调低）</el-text>
+          </el-form-item>
+        </template>
         <el-form-item label="冷却(s)">
           <el-input-number v-model="form.rule.cooldown" :min="0" :max="3600" />
         </el-form-item>
         <el-form-item label="分析帧率">
           <el-input-number v-model="form.rule.fps" :min="1" :max="10" />
+          <el-text v-if="form.rule.detector === 'diving'" size="small" type="info">跳水动作短暂，建议 ≥5fps（CPU 上 pose 推理约 180ms/帧）</el-text>
         </el-form-item>
         <el-form-item label="描述">
           <el-input v-model="form.description" type="textarea" :rows="2" maxlength="500" />
@@ -109,6 +148,7 @@
 </template>
 
 <script setup lang="ts">
+defineProps<{ embedded?: boolean }>()
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -131,15 +171,35 @@ const models = ref<any[]>([])
 const form = reactive({
   name: '',
   description: '',
+  status: '',
   category_codes: [] as string[],
   model_ids: [] as number[],
   rule: {
-    threshold: 0.45,
+    threshold: 0.3,
     duration: 0,
-    cooldown: 60,
+    cooldown: 15,
     fps: 2,
+    detector: 'object',
+    angle_thr: 55,
+    min_air_seconds: 0.4,
+    miss_seconds: 0.8,
+    descent_frac: 0.2,
   },
 })
+
+/** 切换判定方式：diving 模式自动锁定类别为 person、帧率提到 5 */
+function onDetectorChange(v: string) {
+  if (v === 'diving') {
+    form.category_codes = ['person']
+    if (form.rule.fps < 5) form.rule.fps = 5
+    if (form.rule.cooldown < 10) form.rule.cooldown = 10
+    // 自动选中 pose 模型（按名称匹配）
+    const pose = models.value.find((m: any) => m.name?.includes('pose'))
+    if (pose && !form.model_ids.includes(pose.id)) form.model_ids = [pose.id]
+  } else {
+    if (form.rule.fps > 2) form.rule.fps = 2
+  }
+}
 
 function statusType(s: string) {
   return { draft: 'info', ready: 'success', running: 'warning', paused: 'info', pending_train: 'danger' }[s] || 'info'
@@ -186,9 +246,20 @@ function openCreate() {
   editingId.value = null
   form.name = ''
   form.description = ''
+  form.status = ''
   form.category_codes = []
   form.model_ids = []
-  form.rule = { threshold: 0.45, duration: 0, cooldown: 60, fps: 2 }
+  form.rule = {
+    threshold: 0.3,
+    duration: 0,
+    cooldown: 15,
+    fps: 2,
+    detector: 'object',
+    angle_thr: 55,
+    min_air_seconds: 0.4,
+    miss_seconds: 0.8,
+    descent_frac: 0.2,
+  }
   dialogVisible.value = true
 }
 
@@ -196,6 +267,7 @@ function openEdit(row: any) {
   editingId.value = row.id
   form.name = row.name
   form.description = row.description
+  form.status = row.status || ''
   form.category_codes = [...(row.category_codes || [])]
   form.model_ids = [...(row.model_ids || [])]
   form.rule = {
@@ -203,6 +275,11 @@ function openEdit(row: any) {
     duration: row.rule?.duration ?? 0,
     cooldown: row.rule?.cooldown ?? 60,
     fps: row.rule?.fps ?? 2,
+    detector: row.rule?.detector ?? 'object',
+    angle_thr: row.rule?.angle_thr ?? 55,
+    min_air_seconds: row.rule?.min_air_seconds ?? 0.4,
+    miss_seconds: row.rule?.miss_seconds ?? 0.8,
+    descent_frac: row.rule?.descent_frac ?? 0.2,
   }
   dialogVisible.value = true
 }
@@ -211,6 +288,14 @@ async function handleSave() {
   if (!form.name.trim() || form.category_codes.length === 0) {
     ElMessage.warning('请填写事件名称并选择至少一个类别')
     return
+  }
+  // diving 模式前置校验：必须绑定 pose 模型
+  if (form.rule.detector === 'diving') {
+    const bound = models.value.filter((m: any) => form.model_ids.includes(m.id))
+    if (!bound.some((m: any) => m.name?.includes('pose'))) {
+      ElMessage.warning('跳水动作识别需要绑定姿态模型（yolo11n-pose），请在"绑定模型"中选择')
+      return
+    }
   }
   saving.value = true
   try {
@@ -253,9 +338,9 @@ async function handlePublish(row: any) {
   await fetchList()
 }
 
-/** 跳转任务编排并预选当前事件 */
+/** 跳转监控台任务管理并预选当前事件（任务页嵌入监控台 tab，共享 query） */
 function createTask(row: any) {
-  router.push({ path: '/ai-vision/tasks', query: { event_id: row.id, event_name: row.name } })
+  router.push({ path: '/ai-vision/monitor', query: { tab: 'tasks', event_id: row.id, event_name: row.name } })
 }
 
 async function handleRetire(row: any) {

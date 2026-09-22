@@ -169,6 +169,96 @@ def postprocess(
     return results[:max_det]
 
 
+def postprocess_pose(
+    pred: np.ndarray,
+    orig_shape: tuple[int, int],
+    pad: tuple[float, float],
+    ratio: float,
+    class_names: dict[int, str],
+    conf_thr: float = 0.35,
+    iou_thr: float = 0.45,
+    kpt_shape: tuple[int, int] = (17, 3),
+    max_det: int = 50,
+) -> list[dict]:
+    """YOLO-pose 输出张量 → 原图坐标检测框 + 关键点列表。
+
+    输出张量形状 ``(1, 4+nc+nk*kd, N)``（yolo11n-pose 为 ``(1, 56, 8400)``）：
+    4 = cx,cy,w,h（letterbox 输入图坐标），nc = 类别得分，
+    nk*kd = 17 关键点 × (x, y, conf)。
+
+    Returns:
+        每个元素::
+
+            {
+                "bbox": [x1, y1, x2, y2],      # 原图绝对坐标
+                "conf": float,
+                "cls_id": int,
+                "cls_name": str,
+                "keypoints": [[x, y, conf], ...],  # nk 项，原图绝对坐标
+            }
+
+        按置信度降序，最多 max_det 个。
+    """
+    pred = np.asarray(pred)
+    if pred.ndim == 3:
+        pred = pred[0]
+    pred = pred.T  # (N, 4+nc+nk*kd)
+    n, dim = pred.shape
+    nk, kd = int(kpt_shape[0]), int(kpt_shape[1])
+    nc = dim - 4 - nk * kd
+    if nc < 1:
+        raise ValueError(f"pose 输出列数异常: {dim}（nk={nk}, kd={kd}, 应 ≥ 4+nk*kd+1）")
+    pad_w, pad_h = pad
+
+    cls_scores = pred[:, 4 : 4 + nc]
+    cls_ids = cls_scores.argmax(axis=1)
+    scores = cls_scores[np.arange(n), cls_ids]
+
+    mask = scores >= conf_thr
+    if not mask.any():
+        return []
+
+    boxes_p = pred[mask, :4]
+    scores_p = scores[mask]
+    cls_ids_p = cls_ids[mask]
+    kpts_p = pred[mask, 4 + nc :].reshape(-1, nk, kd)
+
+    results: list[dict] = []
+    for cid in np.unique(cls_ids_p):
+        sel = cls_ids_p == cid
+        xyxy = _decode_c2xyxy(boxes_p[sel])
+        keep = nms(xyxy, scores_p[sel], iou_thr)
+        kpts_c = kpts_p[sel]
+        for idx in keep:
+            i = int(idx)
+            x1, y1, x2, y2 = xyxy[i]
+            # letterbox 逆变换回原图（框 + 关键点同一变换）
+            x1 = (x1 - pad_w) / ratio
+            y1 = (y1 - pad_h) / ratio
+            x2 = (x2 - pad_w) / ratio
+            y2 = (y2 - pad_h) / ratio
+            kpts = kpts_c[i].astype(np.float32, copy=True)
+            kpts[:, 0] = (kpts[:, 0] - pad_w) / ratio
+            kpts[:, 1] = (kpts[:, 1] - pad_h) / ratio
+            # 关键点置信度：多数导出版本已 sigmoid；防御性归一到 0~1
+            kc = kpts[:, 2]
+            if kc.size and float(kc.max()) > 1.5:
+                kc = 1.0 / (1.0 + np.exp(-kc))
+            kpts[:, 2] = np.clip(kc, 0.0, 1.0)
+            results.append(
+                {
+                    "cls_id": int(cid),
+                    "cls_name": class_names.get(int(cid), str(int(cid))),
+                    "conf": float(scores_p[sel][i]),
+                    "bbox": [float(x1), float(y1), float(x2), float(y2)],
+                    "keypoints": kpts.tolist(),
+                }
+            )
+
+    results.sort(key=lambda d: d["conf"], reverse=True)
+    return results[:max_det]
+
+
 def _decode_c2xyxy(boxes: np.ndarray) -> np.ndarray:
     """(N,4) cxcywh → (N,4) x1y1x2y2。"""
     out = np.empty_like(boxes)
