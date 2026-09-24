@@ -16,9 +16,9 @@
     </div>
 
     <!-- 列表 -->
-    <el-table v-if="total > 0 || loading" :data="tableData" v-loading="loading" stripe style="width: 100%; margin-top: 16px">
+    <el-table v-if="total > 0 || loading" :data="tableData" v-loading="loading" stripe style="width: 100%; margin-top: 16px" @sort-change="onSortChange">
       <el-table-column prop="id" label="ID" width="60" />
-      <el-table-column prop="name" label="名称" min-width="120" />
+      <el-table-column prop="name" label="名称" min-width="120" sortable="custom" />
       <el-table-column label="类型" width="110">
         <template #default="{ row }">
           <el-tag :type="row.source_type === 'video' ? 'warning' : 'primary'" size="small">
@@ -205,11 +205,23 @@ function createTask(row: any) {
   router.push({ path: '/ai-vision/monitor', query: { tab: 'tasks', camera_id: row.id, camera_name: row.name } })
 }
 
+/** 名称列排序（服务端拼音排序）：ascending→name，descending→-name */
+const sort = ref('')
+function onSortChange({ prop, order }: { prop: string; order: string | null }) {
+  if (prop === 'name' && order) {
+    sort.value = order === 'ascending' ? 'name' : '-name'
+  } else {
+    sort.value = ''
+  }
+  page.value = 1
+  fetchList()
+}
+
 async function fetchList() {
   loading.value = true
   try {
     const res: any = await request.get('/ai-vision/cameras', {
-      params: { page: page.value, page_size: pageSize.value }
+      params: { page: page.value, page_size: pageSize.value, sort: sort.value }
     })
     tableData.value = res.items || []
     total.value = res.total || 0
@@ -299,7 +311,11 @@ async function handleSave() {
 }
 
 async function handleDelete(row: any) {
-  await ElMessageBox.confirm(`确定删除视频源「${row.name}」吗？`, '提示', { type: 'warning' })
+  try {
+    await ElMessageBox.confirm(`确定删除视频源「${row.name}」吗？`, '提示', { type: 'warning' })
+  } catch {
+    return // 取消
+  }
   await request.delete(`/ai-vision/cameras/${row.id}`)
   ElMessage.success('删除成功')
   await fetchList()

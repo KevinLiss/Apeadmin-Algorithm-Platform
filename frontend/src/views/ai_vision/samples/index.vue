@@ -219,7 +219,11 @@ async function handleUpload() {
 }
 
 async function handleDelete(s: any) {
-  await ElMessageBox.confirm(`确定删除样本 #${s.id} 吗？文件将一并删除。`, '提示', { type: 'warning' })
+  try {
+    await ElMessageBox.confirm(`确定删除样本 #${s.id} 吗？文件将一并删除。`, '提示', { type: 'warning' })
+  } catch {
+    return // 取消
+  }
   await request.delete(`/ai-vision/samples/${s.id}`)
   ElMessage.success('已删除')
   await fetchList()

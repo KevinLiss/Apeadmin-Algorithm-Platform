@@ -4,7 +4,7 @@
     <div class="hero" v-if="!embedded">
       <div class="hero-text">
         <h2>类别库</h2>
-        <p class="text-muted">定义 AI 视觉要识别的目标类别。内置类别（人/车/明火/烟雾）开箱即用，也可按业务新增自定义类别</p>
+        <p class="text-muted">定义 AI 视觉要识别的目标类别。内置类别（人员/车辆/明火/烟雾/溺水等）开箱即用，也可按业务新增自定义类别</p>
         <div class="hero-stats">
           <el-tag type="primary" effect="plain" round>内置 {{ builtinCount }} 类</el-tag>
           <el-tag type="success" effect="plain" round>自定义 {{ customCount }} 类</el-tag>
@@ -73,7 +73,7 @@
 
       <!-- 空状态引导 -->
       <el-empty v-else-if="!loading" description="还没有类别" :image-size="120">
-        <p class="empty-tip">内置类别（人/车/明火/烟雾）默认已就绪；如需新增自定义类别请点击下方按钮</p>
+        <p class="empty-tip">内置类别（人员/车辆/明火/烟雾/溺水等）默认已就绪；如需新增自定义类别请点击下方按钮</p>
         <el-button type="primary" @click="openCreate" v-permission="'ai_vision:category:create'">
           <el-icon><Plus /></el-icon> 新增类别
         </el-button>
@@ -224,7 +224,11 @@ async function handleDelete(row: any) {
   const msg = row.source === 'builtin'
     ? `确定停用内置类别「${row.name}」吗？停用后识别事件将无法引用。`
     : `确定删除「${row.name}」吗？`
-  await ElMessageBox.confirm(msg, '提示', { type: 'warning' })
+  try {
+    await ElMessageBox.confirm(msg, '提示', { type: 'warning' })
+  } catch {
+    return // 取消
+  }
   await request.delete(`/ai-vision/categories/${row.id}`)
   ElMessage.success(row.source === 'builtin' ? '已停用' : '删除成功')
   await fetchList()

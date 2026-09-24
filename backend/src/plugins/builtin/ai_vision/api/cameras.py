@@ -44,22 +44,66 @@ async def list_cameras(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     keyword: str = Query(default="", max_length=50),
+    sort: str = Query(default="", max_length=20, description="排序：name=名称拼音升序 / -name=降序，默认 ID 升序"),
 ):
-    """分页查询摄像头（支持名称/位置关键字过滤）。"""
+    """分页查询摄像头（名称/位置关键字过滤 + 名称拼音排序）。
+
+    状态显示为实时覆盖（DB status 只在点"测试"时更新一次，是陈旧快照）：
+    - 监控运行中（worker 存活）→ worker 实时 online/offline
+    - 未监控：视频源文件已丢失 → offline；其余 → unknown
+    """
     stmt = select(AIVisionCamera).where(AIVisionCamera.is_deleted == False)  # noqa: E712
     if keyword:
         stmt = stmt.where(
             AIVisionCamera.name.contains(keyword)
             | AIVisionCamera.location.contains(keyword)
         )
-    total = len((await db.execute(stmt)).scalars().all())
-    stmt = stmt.order_by(AIVisionCamera.id.asc()).offset((page - 1) * page_size).limit(page_size)
-    items = (await db.execute(stmt)).scalars().all()
+    rows = list((await db.execute(stmt)).scalars().all())
+
+    # 排序：拼音（"汽车着火"→qichezhuohuo，逐字比较，同字看下一字）或 ID
+    if sort in ("name", "-name"):
+        try:
+            from pypinyin import lazy_pinyin
+
+            rows.sort(
+                key=lambda c: "".join(lazy_pinyin(c.name or "")),
+                reverse=(sort == "-name"),
+            )
+        except ImportError:
+            rows.sort(key=lambda c: (c.name or ""), reverse=(sort == "-name"))
+    else:
+        rows.sort(key=lambda c: c.id)
+
+    total = len(rows)
+    items = rows[(page - 1) * page_size : page * page_size]
+
+    # 实时状态覆盖（worker 内存态优先于 DB 快照）
+    from pathlib import Path
+
+    try:
+        from src.plugins.builtin.ai_vision.runtime.manager import get_manager
+
+        wstates = {w["camera_id"]: w for w in get_manager().list_workers()}
+    except Exception:  # noqa: BLE001（管理器不可用时退回 DB 状态）
+        wstates = {}
+
+    out = []
+    for item in items:
+        d = _parse_out(item)
+        w = wstates.get(item.id)
+        if w is not None and w.get("running"):
+            d["status"] = w.get("state") or "unknown"
+        elif item.source_type == "video" and not Path(item.rtsp_url or "").is_file():
+            d["status"] = "offline"
+        else:
+            d["status"] = "unknown"
+        out.append(d)
+
     return success_response(data={
         "total": total,
         "page": page,
         "page_size": page_size,
-        "items": [_parse_out(item) for item in items],
+        "items": out,
     })
 
 

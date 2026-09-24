@@ -297,7 +297,11 @@ async function handleStop(row: any) {
 }
 
 async function handleDelete(row: any) {
-  await ElMessageBox.confirm(`确定删除任务「#${row.id} ${row.camera_name || ''} × ${row.event_name || ''}」吗？`, '提示', { type: 'warning' })
+  try {
+    await ElMessageBox.confirm(`确定删除任务「#${row.id} ${row.camera_name || ''} × ${row.event_name || ''}」吗？`, '提示', { type: 'warning' })
+  } catch {
+    return // 取消
+  }
   await request.delete(`/ai-vision/tasks/${row.id}`)
   ElMessage.success('删除成功')
   await fetchList()

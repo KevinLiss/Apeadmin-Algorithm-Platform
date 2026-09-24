@@ -7,7 +7,7 @@
 - GET /dashboard/runtime：实时运行指标（活跃 worker 数、各 worker fps/延迟/丢帧、CPU/内存）
 - GET /dashboard/overview：今日告警数、7 日趋势、事件分布、摄像头排行
 """
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as dtime, timedelta, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
@@ -99,7 +99,9 @@ async def dashboard_overview(
 ):
     """业务概览：今日告警、7 日趋势、事件分布、摄像头排行。"""
     now = datetime.now(timezone.utc)
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    # 日切分统一按北京时间：created_at 为 naive UTC，北京零点 = 其 UTC 值前一日 16:00
+    bj_now = now + timedelta(hours=8)
+    today_start = datetime.combine(bj_now.date(), dtime.min, tzinfo=timezone.utc) - timedelta(hours=8)
 
     # 今日告警数
     today_alarms = len(
@@ -114,10 +116,10 @@ async def dashboard_overview(
         )).scalars().all()
     )
 
-    # 7 日趋势（按天分组）
+    # 7 日趋势（按天分组，北京日期）
     trend: dict[str, int] = {}
     for i in range(6, -1, -1):
-        day = (now - timedelta(days=i)).strftime("%m-%d")
+        day = (bj_now - timedelta(days=i)).strftime("%m-%d")
         trend[day] = 0
     alarms = (await db.execute(
         select(AIVisionAlarm.created_at)
@@ -125,8 +127,8 @@ async def dashboard_overview(
     for ts in alarms:
         if ts is None:
             continue
-        # 转本地时区近似（UTC → 东八区 +8h）
-        local_ts = ts + timedelta(hours=8) if ts.tzinfo else ts
+        # naive UTC → 北京时间（+8h）；带 tzinfo 的直接换时区
+        local_ts = ts + timedelta(hours=8) if ts.tzinfo is None else ts.astimezone(timezone(timedelta(hours=8)))
         key = local_ts.strftime("%m-%d")
         if key in trend:
             trend[key] += 1

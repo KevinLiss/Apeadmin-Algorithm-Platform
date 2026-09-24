@@ -388,6 +388,11 @@ function tick() {
   fetchOverview()
 }
 
+/** 窗口/侧栏尺寸变化时重排图表（防拉伸变形） */
+function handleResize() {
+  charts.forEach((c) => c.resize())
+}
+
 function startPoll() {
   pollTimer = window.setInterval(tick, 30000)
 }
@@ -395,10 +400,12 @@ function startPoll() {
 onMounted(async () => {
   await detect()
   if (ready.value) startPoll()
+  window.addEventListener('resize', handleResize)
 })
 
 onBeforeUnmount(() => {
   if (pollTimer) window.clearInterval(pollTimer)
+  window.removeEventListener('resize', handleResize)
   charts.forEach((c) => c.dispose())
   charts = []
 })

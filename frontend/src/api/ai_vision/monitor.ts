@@ -17,9 +17,10 @@ export function resolveSource(cameraId: number) {
 }
 
 // MJPEG 实时流地址（<img> 标签无法带 Authorization 头，token 走 query）
+// _t 时间戳：每次切换源生成新 URL，强制浏览器放弃连接复用、中止旧流
 export function streamUrl(cameraId: number, fps = 5) {
   const token = localStorage.getItem('apeadmin_token') || ''
-  return `/api/v1/ai-vision/monitor/stream/${cameraId}?token=${encodeURIComponent(token)}&fps=${fps}`
+  return `/api/v1/ai-vision/monitor/stream/${cameraId}?token=${encodeURIComponent(token)}&fps=${fps}&_t=${Date.now()}`
 }
 
 // 复用：任务启停（监控台"开始/停止监控"按钮）

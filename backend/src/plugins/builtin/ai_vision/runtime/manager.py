@@ -68,6 +68,8 @@ class WorkerManager:
                     "running": worker.is_running,
                     "fps_actual": worker.stats.fps_actual,
                     "frames_processed": worker.stats.frames_processed,
+                    "frames_read": worker.stats.frames_read,
+                    "drop_rate": worker.stats.drop_rate,
                     "last_alarm_at": worker.stats.last_alarm_at,
                 })
             return out

@@ -147,17 +147,27 @@
                   ></video>
                   <div class="video-watermark">{{ clockText }}</div>
                 </template>
-                <!-- 监控模式（含视频文件源）：MJPEG 推流，检测框由后端直接画在分析帧上 -->
-                <template v-else-if="mjpegSrc">
-                  <img :src="mjpegSrc" class="video-el" alt="实时画面" @error="streamError = true" />
-                  <div v-if="streamError" class="stream-tip">
-                    实时流不可用（运行环境未安装或后端未启动）；开始监控后自动恢复
-                  </div>
-                </template>
-                <!-- video 源但文件不在 media 目录下 -->
-                <template v-else>
-                  <el-empty description="该视频文件不在平台媒体目录内，无法在线播放；开始监控后仍可正常分析与告警" :image-size="90" />
-                </template>
+                <!-- 监控模式：MJPEG 推流（检测框由后端画在分析帧上）。
+                     img 常驻 DOM 用 v-show 切换——若随 v-if 卸载，Chrome 会挂起
+                     而不关闭进行中的 multipart 流，切源即泄漏一条连接，6 条占满
+                     同源连接池后新视频/接口全部排队卡死（2026-09-23 修复）。
+                     src 反应式切换为空白 data: 即强制中止旧流。 -->
+                <img
+                  v-show="!showPreview && !!mjpegSrc"
+                  ref="streamImgRef"
+                  :src="mjpegSrc || BLANK_SRC"
+                  class="video-el"
+                  alt="实时画面"
+                  @error="onStreamImgError"
+                />
+                <div v-if="!showPreview && !mjpegSrc" class="stream-idle">
+                  {{ isVideoSource
+                    ? '未开始监控；开始监控后显示带检测框的分析画面（该视频文件不在媒体目录时无法原片回看，不影响分析告警）'
+                    : '未开始监控，点击「开始监控」查看实时画面' }}
+                </div>
+                <div v-if="streamError && !showPreview && !!mjpegSrc" class="stream-tip">
+                  实时流不可用（运行环境未安装或后端未启动）；开始监控后自动恢复
+                </div>
               </div>
               <div class="video-box" v-else>
                 <el-empty description="请先选择视频源" :image-size="90" />
@@ -210,6 +220,7 @@
                         <div class="tl-time" :class="{ 'time-highlight': a._fresh }">{{ formatTime(a.created_at) }}</div>
                         <div class="tl-body">
                           <div class="alarm-title">
+                            <!-- 缩略图：仅大图预览；回看视频用下方"回看"链接（避免点击冲突） -->
                             <el-image
                               v-if="a.snapshot_url"
                               :src="a.snapshot_url"
@@ -217,7 +228,6 @@
                               preview-teleported
                               fit="cover"
                               class="alarm-thumb"
-                              @click="seekAlarm(a)"
                             />
                             <el-tag size="small" :type="a.level === 'critical' ? 'danger' : 'warning'" effect="dark">{{ a.event_name || a.category_code }}</el-tag>
                             <span class="alarm-conf">{{ (a.confidence * 100).toFixed(0) }}%</span>
@@ -304,6 +314,9 @@ let alarmTimer: number | null = null
 let statusTimer: number | null = null
 let clockTimer: number | null = null
 const clockText = ref('')
+const streamImgRef = ref<HTMLImageElement | null>(null)
+// 空白图源：把 <img>.src 切到它即可强制浏览器中止进行中的 MJPEG 流
+const BLANK_SRC = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=='
 
 // 视频文件源：监控中默认显示带检测框的 MJPEG 监控画面，可切换回原视频播放器回看
 const previewVideo = ref(false)
@@ -318,12 +331,16 @@ const currentFps = computed(() => {
   return w?.fps_actual ?? null
 })
 const mjpegSrc = computed(() => {
-  // 监控画面统一走 MJPEG：检测框由后端画在分析帧上，画面与框严格对齐
-  // （video 源未开始监控时走原视频播放器，不请求此流）
-  if (!cameraId.value) return ''
-  if (showPreview.value) return ''
+  // 仅"监控中且非原片回看"时才建立 MJPEG 流连接——未监控时 RTSP 源只会推
+  // NO SIGNAL 占位帧，却白占一条长连接（Chrome 同源 6 连接上限）。
+  // URL 含 _t 时间戳，切源即新连接、旧连接由 src 变更触发浏览器 abort。
+  if (!cameraId.value || !monitoring.value || showPreview.value) return ''
   return streamUrl(cameraId.value, 5)
 })
+
+function onStreamImgError() {
+  streamError.value = true
+}
 // 角标 = 当前时间线列表内未处理条数（清空/处置后即时归零；全局待处理数见顶部指标卡）
 const pendingInTimeline = computed(() => timeline.value.filter((a) => a.status === 'pending').length)
 
@@ -446,8 +463,11 @@ async function startMonitor() {
     for (const eid of eventIds.value) {
       let t = tasks.find((x) => x.event_id === eid)
       if (!t) {
-        // 隐式创建任务（camera × event，默认 2fps，可去任务详情调整）
-        const created: any = await createTask({ camera_id: cameraId.value, event_id: eid, analyze_fps: 2 })
+        // 隐式创建任务（camera × event）：帧率跟随事件规则（跳水事件 ≥5fps），
+        // 其余默认 2fps，可去任务详情调整
+        const evt = events.value.find((e) => e.id === eid)
+        const fps = Math.max(1, Math.min(10, Number(evt?.rule?.fps) || 2))
+        const created: any = await createTask({ camera_id: cameraId.value, event_id: eid, analyze_fps: fps })
         t = created
       }
       if (t && t.status !== 'running') {
@@ -630,6 +650,9 @@ onBeforeUnmount(() => {
   if (alarmTimer) window.clearInterval(alarmTimer)
   if (statusTimer) window.clearInterval(statusTimer)
   if (clockTimer) window.clearInterval(clockTimer)
+  // 离开页面前主动把流 img 指向空白源：仅销毁 DOM 的话 Chrome 会挂起
+  // 而非关闭 multipart 流，僵尸连接会占满同源连接池（切源卡加载根因）
+  if (streamImgRef.value) streamImgRef.value.src = BLANK_SRC
 })
 </script>
 
@@ -677,6 +700,10 @@ onBeforeUnmount(() => {
 .stream-tip {
   position: absolute; bottom: 10px; left: 0; right: 0; text-align: center;
   color: #ffd04b; font-size: 12px; text-shadow: 0 1px 2px #000; pointer-events: none;
+}
+.stream-idle {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  color: #9aa0a6; font-size: 13px; text-align: center; padding: 0 24px; line-height: 1.7;
 }
 .video-box :deep(.el-empty) { --el-empty-padding: 12px; }
 .video-box :deep(.el-empty__description p) { color: #aaa; }

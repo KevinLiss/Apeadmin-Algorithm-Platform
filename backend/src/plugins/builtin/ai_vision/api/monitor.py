@@ -14,7 +14,7 @@
 ``uploads/ai_vision`` 下，已由 ``plugin.register()`` 挂载的 StaticFiles
 （``/api/v1/ai-vision/media``）直接服务，原生支持 HTTP Range（进度条拉拽）。
 """
-from datetime import datetime, time as dtime, timezone
+from datetime import datetime, time as dtime, timedelta, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -115,7 +115,10 @@ async def monitor_status(
 ):
     """监控台指标：今日告警 / 未处理 / 活跃 worker 快照。"""
     now = datetime.now(timezone.utc)
-    day_start = datetime.combine(now.date(), dtime.min, tzinfo=timezone.utc)
+    # "今日"按北京时间日切分：created_at 为 naive UTC；北京今日零点
+    # 对应的 naive UTC = (now+8h).date() 的 00:00 再减 8 小时
+    bj_today = (now + timedelta(hours=8)).date()
+    day_start = datetime.combine(bj_today, dtime.min, tzinfo=timezone.utc) - timedelta(hours=8)
 
     today_total = (await db.execute(
         select(func.count(AIVisionAlarm.id)).where(AIVisionAlarm.created_at >= day_start)
@@ -187,6 +190,18 @@ def _auth_from_query(token: str | None) -> None:
         raise AuthException("Invalid or expired token")
 
 
+# 流兜底策略（防僵尸连接）：浏览器对移除/挂起的流式 <img> 不主动 abort，
+# 切源会遗留 ESTABLISHED 长连接占满 Chrome 同源 6 连接池（前端已配合
+# src→data: 主动断流）。后端做三道兜底：
+#   1) 每摄像头并发流上限 2 路，超出直接 503；
+#   2) worker 不存在（NO SIGNAL 占位）累计 120s 自动结束流；
+#   3) 单条流最长存活 30 分钟强制回收（浏览器 img 会自行重连）。
+_STREAM_MAX_PER_CAMERA = 2
+_STREAM_IDLE_LIMIT_S = 120.0
+_STREAM_LIFETIME_LIMIT_S = 1800.0
+_stream_counts: dict[int, int] = {}
+
+
 @router.get("/stream/{camera_id}")
 async def mjpeg_stream(
     camera_id: int,
@@ -200,36 +215,62 @@ async def mjpeg_stream(
       一期直接推原始帧 + 左上角时间/摄像头信息水印）；
     - worker 未运行 → 推送灰色占位帧（"信号未启动"）。
 
-    注意：本端点是长连接，客户端断开（GeneratorExit）时自然结束。
+    注意：本端点是长连接，客户端断开（GeneratorExit）时自然结束；
+    另有并发/空闲/存活三重兜底防僵尸连接（见 _STREAM_* 常量）。
     """
     _auth_from_query(token)
 
     from src.plugins.builtin.ai_vision.runtime.manager import get_manager
+
+    current = _stream_counts.get(camera_id, 0)
+    if current >= _STREAM_MAX_PER_CAMERA:
+        raise HTTPException(status_code=503, detail="该视频源预览连接已达上限，请关闭其他预览窗口")
+    _stream_counts[camera_id] = current + 1
 
     manager = get_manager()
     interval = 1.0 / max(1, min(fps, 15))
 
     async def gen():
         import asyncio
+        import time as _time
 
-        while True:
-            worker = manager.get_worker(camera_id)
-            frame = None
-            video_ts = 0.0
-            boxes: list[dict] = []
-            if worker is not None:
-                frame, frame_ts, video_ts = await asyncio.to_thread(worker.latest_frame)
-                boxes = await asyncio.to_thread(worker.latest_detections)
-            jpeg = await asyncio.to_thread(_encode_stream_frame, frame, camera_id, video_ts, boxes)
-            if jpeg is None:
-                return  # 编码器不可用（L1 未装）：直接结束流
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n"
-                b"Content-Length: " + str(len(jpeg)).encode() + b"\r\n\r\n"
-                + jpeg + b"\r\n"
-            )
-            await asyncio.sleep(interval)
+        started = _time.monotonic()
+        idle_since: float | None = None
+        try:
+            while True:
+                now = _time.monotonic()
+                if now - started > _STREAM_LIFETIME_LIMIT_S:
+                    return  # 存活上限：强制回收（浏览器 img 自动重连）
+                worker = manager.get_worker(camera_id)
+                frame = None
+                video_ts = 0.0
+                boxes: list[dict] = []
+                if worker is not None:
+                    frame, frame_ts, video_ts = await asyncio.to_thread(worker.latest_frame)
+                    boxes = await asyncio.to_thread(worker.latest_detections)
+                if frame is None:
+                    if idle_since is None:
+                        idle_since = now
+                    elif now - idle_since > _STREAM_IDLE_LIMIT_S:
+                        return  # 长时间无画面（任务未启动/已停止）：结束僵尸流
+                else:
+                    idle_since = None
+                jpeg = await asyncio.to_thread(_encode_stream_frame, frame, camera_id, video_ts, boxes)
+                if jpeg is None:
+                    return  # 编码器不可用（L1 未装）：直接结束流
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n"
+                    b"Content-Length: " + str(len(jpeg)).encode() + b"\r\n\r\n"
+                    + jpeg + b"\r\n"
+                )
+                await asyncio.sleep(interval)
+        finally:
+            left = _stream_counts.get(camera_id, 1) - 1
+            if left <= 0:
+                _stream_counts.pop(camera_id, None)
+            else:
+                _stream_counts[camera_id] = left
 
     return StreamingResponse(
         gen(),

@@ -220,7 +220,11 @@ async function handleFalsePositive(row: any) {
 }
 
 async function handleToSample(row: any) {
-  await ElMessageBox.confirm('将该告警抓拍图转入样本库？', '提示', { type: 'info' })
+  try {
+    await ElMessageBox.confirm('将该告警抓拍图转入样本库？', '提示', { type: 'info' })
+  } catch {
+    return // 取消
+  }
   await request.post(`/ai-vision/alarms/${row.id}/to-sample`)
   ElMessage.success('已转样本')
   await fetchList()

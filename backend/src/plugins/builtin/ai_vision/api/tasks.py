@@ -124,11 +124,31 @@ async def list_tasks(
         )).scalars().all()
     } if evt_ids else {}
 
+    # 运行中任务的实时指标来自 worker 内存快照（last_stats 不持久化，
+    # 仅在启动时清零——列表接口直接叠加，否则"实时指标"列永远为空）
+    live_by_task: dict[int, dict] = {}
+    try:
+        from src.plugins.builtin.ai_vision.runtime.manager import get_manager
+
+        for w in get_manager().list_workers():
+            stats = {
+                "fps_actual": w["fps_actual"],
+                "frames_processed": w["frames_processed"],
+                "frames_read": w.get("frames_read"),
+                "drop_rate": w.get("drop_rate"),
+            }
+            for tid in w["tasks"]:
+                live_by_task[tid] = stats
+    except Exception:  # noqa: BLE001  manager 未就绪时静默降级
+        pass
+
     result = []
     for item in items:
         d = _parse_out(item)
         d["camera_name"] = cams.get(item.camera_id, "")
         d["event_name"] = evts.get(item.event_id, "")
+        if item.status == "running" and item.id in live_by_task:
+            d["last_stats"] = live_by_task[item.id]
         result.append(d)
 
     return success_response(data={
@@ -228,6 +248,17 @@ async def start_task(
     if evt.status not in {"ready", "running"}:
         raise HTTPException(status_code=400, detail=f"事件状态 {evt.status} 不可启动任务")
 
+    # 帧率纠偏：任务 analyze_fps 低于事件规则 fps 时提升到规则值。
+    # 场景：跳水等短动作事件规则要求 ≥5fps，但旧任务/监控台早期版本建的
+    # 任务写死 2fps——2fps 采样会整段跳过腾空姿态帧导致漏报（真实跳水
+    # 视频实测 2fps 只抓到 1/3 次跳水）。落库持久化，worker 按新值跑。
+    try:
+        rule_fps = int(json.loads(evt.rule or "{}").get("fps", 0) or 0)
+    except (ValueError, TypeError):
+        rule_fps = 0
+    if rule_fps and item.analyze_fps < rule_fps:
+        item.analyze_fps = rule_fps
+
     binding = await _build_binding(db, item)
 
     # 同步写状态 → 异步启动 worker（WorkerManager 内部有锁）
@@ -274,7 +305,8 @@ async def stop_task(
         raise HTTPException(status_code=500, detail=f"任务停止失败: {exc}") from exc
 
     item.status = "stopped"
-    item.started_at = None
+    # started_at 保留为"最近一次启动时间"（原来清空导致列表恒显示"—"，
+    # 历史运行时间无从追溯；重新开始时会被新的启动时间覆盖）
     await db.commit()
 
     # 事件状态回退：若该事件无其他运行任务 → ready

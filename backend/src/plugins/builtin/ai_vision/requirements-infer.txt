@@ -4,3 +4,5 @@ onnxruntime>=1.17.0
 opencv-python-headless>=4.9.0
 numpy>=1.24.0
 pillow>=10.0.0
+# 视频源名称列拼音排序（cameras.py 内软导入，缺失时排序降级为 ID 序）
+pypinyin>=0.51.0
