@@ -77,6 +77,10 @@ async def _seed_menus(db: AsyncSession) -> None:
         ("样本库", "AI 视觉平台", "C", "samples", "ai_vision/samples/index", "ai_vision:sample:list", "Picture", 6),
         ("上传样本", "样本库", "F", None, None, "ai_vision:sample:create", None, 1),
         ("删除样本", "样本库", "F", None, None, "ai_vision:sample:delete", None, 2),
+        ("标注样本", "样本库", "F", None, None, "ai_vision:sample:edit", None, 3),
+        ("模型训练", "AI 视觉平台", "C", "train", "ai_vision/train/index", "ai_vision:train:list", "Cpu", 7),
+        ("发起训练", "模型训练", "F", None, None, "ai_vision:train:create", None, 1),
+        ("停止训练", "模型训练", "F", None, None, "ai_vision:train:control", None, 2),
     ]
 
     existing = list((await db.execute(select(Menu))).scalars().all())
@@ -110,12 +114,12 @@ async def _seed_menus(db: AsyncSession) -> None:
     if created_menus:
         logger.info(f"Created {len(created_menus)} ai_vision menus")
 
-    # ── 页面归并迁移（幂等）：隐藏被归并的旧 4 页菜单 ──
+    # ── 页面归并迁移（幂等）：隐藏被归并的旧页菜单 ──
     # 保留 status=1（权限字符串继续生效，embedded 组件与深链路由可用），
     # 仅 visible=0（侧边栏不显示）。重复执行无副作用。
-    merged_hidden = {"识别事件", "任务编排", "告警中心", "类别库"}
-    # 可见菜单排序归一：监控台(3) → 规则配置(4) → 摄像头(5) → 样本库(6)
-    sort_norm = {"实时监控台": 3, "规则配置": 4, "摄像头管理": 5, "样本库": 6}
+    merged_hidden = {"识别事件", "任务编排", "告警中心", "类别库", "样本库"}
+    # 可见菜单排序归一：监控台(3) → 规则配置(4) → 摄像头(5) → 模型训练(6)
+    sort_norm = {"实时监控台": 3, "规则配置": 4, "摄像头管理": 5, "模型训练": 6}
     changed = 0
     for m in existing:
         if m.parent_id != parent.id:

@@ -228,8 +228,11 @@ async def upload_env_file(
         size = tmp.stat().st_size
         tmp.replace(dest)
     finally:
-        if tmp.exists():
-            tmp.unlink()
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except BaseException:  # noqa: BLE001 — 删除保护钩子可能抛 SystemExit
+            pass
 
     # 更新/新增 DB 记录
     existing = (await db.execute(
@@ -275,6 +278,69 @@ async def upload_env_file(
     }, msg="模型文件上传成功")
 
 
+@router.put("/{model_id}/pt")
+async def register_pt(
+    model_id: int,
+    body: dict,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+    _perm: Annotated[User, Depends(_require_perm("ai_vision:model:manage"))],
+):
+    """登记训练基座权重 .pt 路径（续训起点）。
+
+    body: {"path": "..."} 支持绝对路径或相对 backend 根的路径；
+    文件必须存在且以 .pt 结尾。登记后该模型可作为训练基座。
+    """
+    from pathlib import Path as _P
+
+    item = await db.get(AIVisionModel, model_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="模型不存在")
+    raw = str(body.get("path", "")).strip()
+    if not raw.endswith(".pt"):
+        raise HTTPException(status_code=400, detail="仅支持 .pt 权重文件")
+    p = _P(raw)
+    if not p.is_absolute():
+        # 相对路径：依次尝试 插件根（assets/models 实际位置）/ backend 根 / MODELS_DIR
+        # 本文件在 ai_vision/api/ 下：parents[1]=ai_vision/，parents[6]=backend/
+        for base in (_P(__file__).resolve().parents[1], _P(__file__).resolve().parents[6], MODELS_DIR):
+            cand = base / raw
+            if cand.exists():
+                p = cand
+                break
+    if not p.exists():
+        raise HTTPException(status_code=400, detail=f"权重文件不存在: {raw}")
+    item.pt_path = str(p)
+    await db.commit()
+    await db.refresh(item)
+    return success_response(msg="基座权重已登记", data={"pt_path": item.pt_path})
+
+
+@router.put("/{model_id}/category-map")
+async def set_category_map(
+    model_id: int,
+    body: dict,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+    _perm: Annotated[User, Depends(_require_perm("ai_vision:model:manage"))],
+):
+    """登记模型类别顺序表。body: {"names": ["swimming", ...]}（顺序即 YOLO 索引）。"""
+    import json as _json
+
+    item = await db.get(AIVisionModel, model_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="模型不存在")
+    names = body.get("names")
+    if not isinstance(names, list) or not names or not all(isinstance(n, str) and n for n in names):
+        raise HTTPException(status_code=400, detail="names 必须为非空字符串数组")
+    if len(set(names)) != len(names):
+        raise HTTPException(status_code=400, detail="names 存在重复类别")
+    item.category_map = _json.dumps({str(i): n for i, n in enumerate(names)}, ensure_ascii=False)
+    await db.commit()
+    await db.refresh(item)
+    return success_response(msg="类别表已登记", data={"category_map": item.category_map})
+
+
 @router.delete("/{model_id}")
 async def delete_env_file(
     model_id: int,
@@ -292,8 +358,11 @@ async def delete_env_file(
         raise HTTPException(status_code=400, detail=f"模型被事件引用（{names}），请先解绑再删除")
 
     fp = MODELS_DIR / Path(m.file_path).name
-    if fp.exists():
-        fp.unlink()
+    try:
+        if fp.exists():
+            fp.unlink()
+    except BaseException:  # noqa: BLE001 — 删除保护钩子可能抛 SystemExit，不可杀进程
+        pass  # 文件删不掉不阻塞记录删除（留孤儿文件可后续清理）
     await db.delete(m)
     await db.commit()
     try:

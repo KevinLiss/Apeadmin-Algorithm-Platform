@@ -41,9 +41,21 @@ def samples_dir() -> Path:
     return UPLOADS_AI_VISION_DIR / "samples"
 
 
+def datasets_dir() -> Path:
+    """导出的 YOLO 数据集目录：uploads/ai_vision/datasets/{job_id}。"""
+    return UPLOADS_AI_VISION_DIR / "datasets"
+
+
+def train_runs_dir() -> Path:
+    """训练产物目录：uploads/ai_vision/train_runs/{job_id}（best.pt/onnx/日志）。"""
+    return UPLOADS_AI_VISION_DIR / "train_runs"
+
+
 def ensure_dirs() -> None:
-    """幂等创建插件上传目录（抓拍/样本）。"""
+    """幂等创建插件上传目录（抓拍/样本/数据集/训练产物）。"""
     snapshots = UPLOADS_AI_VISION_DIR / "snapshots"
     samples = UPLOADS_AI_VISION_DIR / "samples"
     snapshots.mkdir(parents=True, exist_ok=True)
     samples.mkdir(parents=True, exist_ok=True)
+    datasets_dir().mkdir(parents=True, exist_ok=True)
+    train_runs_dir().mkdir(parents=True, exist_ok=True)

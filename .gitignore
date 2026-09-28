@@ -21,6 +21,11 @@ runtimes/
 *.db
 *.sqlite3
 *.db.bak_*
+*.db-wal
+*.db-shm
+
+# Build check temp dirs
+dist_check*/
 
 # Runtime uploads (plugin packages / media)
 backend/src/uploads/

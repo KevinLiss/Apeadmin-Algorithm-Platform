@@ -120,7 +120,7 @@ class AIVisionModel(IDMixin, TimestampMixin, Base):
 
     __tablename__ = "ai_vision_models"
 
-    name: Mapped[str] = mapped_column(String(200), comment="模型名称")
+    name: Mapped[str] = mapped_column(String(200), unique=True, comment="模型名称（唯一，训练产物命名查重依据）")
     file_path: Mapped[str] = mapped_column(String(500), comment="ONNX 文件相对路径")
     sha256: Mapped[str] = mapped_column(String(64), default="", comment="文件哈希")
     file_size: Mapped[int] = mapped_column(Integer, default=0, comment="文件大小字节")
@@ -137,6 +137,9 @@ class AIVisionModel(IDMixin, TimestampMixin, Base):
     )
     license_note: Mapped[str] = mapped_column(String(500), default="", comment="来源与许可说明")
     version: Mapped[str] = mapped_column(String(20), default="1.0.0", comment="版本")
+    pt_path: Mapped[str] = mapped_column(
+        String(500), default="", comment="训练基座权重 .pt 路径（续训起点；空=不可作为基座）"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +201,13 @@ class AIVisionAlarm(IDMixin, TimestampMixin, Base):
     camera_id: Mapped[int] = mapped_column(Integer, comment="摄像头 ID")
     category_code: Mapped[str] = mapped_column(String(50), comment="命中类别")
     confidence: Mapped[float] = mapped_column(Float, default=0.0, comment="置信度")
-    snapshot_path: Mapped[str] = mapped_column(String(500), default="", comment="抓拍图路径")
+    snapshot_path: Mapped[str] = mapped_column(String(500), default="", comment="抓拍图路径（画框图，给人看）")
+    clean_snapshot_path: Mapped[str] = mapped_column(
+        String(500), default="", comment="干净原图路径（无框无标签，转样本训练用）"
+    )
+    boxes_json: Mapped[str] = mapped_column(
+        String(1000), default="", comment="触发时刻检测框 JSON [{class_name,x,y,w,h}]（YOLO 归一化），转样本自动带标注"
+    )
     video_ts: Mapped[float] = mapped_column(
         Float, default=0.0, comment="视频源告警时刻的播放位置(秒)；RTSP 源为 0"
     )
@@ -236,6 +245,7 @@ class AIVisionSample(IDMixin, TimestampMixin, Base):
         Text, default="{}", comment="JSON: YOLO 标注数据"
     )
     category_code: Mapped[str] = mapped_column(String(50), default="", comment="关联类别")
+    folder: Mapped[str] = mapped_column(String(100), default="", comment="自定义分组文件夹（空=未分组）")
     related_event_id: Mapped[int | None] = mapped_column(
         Integer, nullable=True, comment="关联事件"
     )

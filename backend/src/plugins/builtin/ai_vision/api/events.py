@@ -13,7 +13,7 @@ import json
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.deps import get_current_user
@@ -88,7 +88,7 @@ async def list_events(
         stmt = stmt.where(AIVisionEvent.name.contains(keyword))
     if status:
         stmt = stmt.where(AIVisionEvent.status == status)
-    total = len((await db.execute(stmt)).scalars().all())
+    total = (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar() or 0
     stmt = stmt.order_by(AIVisionEvent.id.desc()).offset((page - 1) * page_size).limit(page_size)
     items = (await db.execute(stmt)).scalars().all()
     return success_response(data={

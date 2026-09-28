@@ -26,6 +26,7 @@ from src.plugins.builtin.ai_vision.api.monitor import router as monitor_router
 from src.plugins.builtin.ai_vision.api.runtime_env import router as runtime_env_router
 from src.plugins.builtin.ai_vision.api.samples import router as samples_router
 from src.plugins.builtin.ai_vision.api.tasks import router as tasks_router
+from src.plugins.builtin.ai_vision.api.train_jobs import router as train_jobs_router
 from src.plugins.builtin.ai_vision.api.videos import router as videos_router
 
 router = APIRouter(prefix="/ai-vision", tags=["AI 视觉平台"])
@@ -43,6 +44,7 @@ router.include_router(monitor_router)
 router.include_router(runtime_env_router)
 router.include_router(samples_router)
 router.include_router(tasks_router)
+router.include_router(train_jobs_router)
 router.include_router(videos_router)
 
 

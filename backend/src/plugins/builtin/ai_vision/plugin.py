@@ -107,6 +107,10 @@ class AIVisionPlugin(PluginInterface):
         # (表名, 列名, DDL 片段)
         required = [
             ("ai_vision_alarms", "video_ts", "FLOAT DEFAULT 0"),
+            ("ai_vision_models", "pt_path", "VARCHAR(500) DEFAULT ''"),
+            ("ai_vision_alarms", "clean_snapshot_path", "VARCHAR(500) DEFAULT ''"),
+            ("ai_vision_alarms", "boxes_json", "VARCHAR(1000) DEFAULT ''"),
+            ("ai_vision_samples", "folder", "VARCHAR(100) DEFAULT ''"),
         ]
         try:
             async with engine.begin() as conn:
@@ -123,6 +127,54 @@ class AIVisionPlugin(PluginInterface):
         except Exception as exc:  # noqa: BLE001
             # 补列失败不阻断插件安装（老库缺列时告警插入才会报错，日志可定位）
             logger.warning(f"[AIVision] schema column migration failed: {exc}")
+
+        await self._ensure_indexes()
+
+    async def _ensure_indexes(self) -> None:
+        """幂等建索引：热查询列全表扫描在告警/样本增长后会拖慢列表与看板。
+
+        全部 CREATE INDEX IF NOT EXISTS，只加索引不动数据；
+        唯一索引前先校验无重复数据（有重复则跳过并告警，不强行改数据）。
+        """
+        from sqlalchemy import text
+
+        from src.db import engine
+
+        # (索引名, DDL)
+        indexes = [
+            ("idx_ai_alarm_cam_id", "CREATE INDEX IF NOT EXISTS idx_ai_alarm_cam_id ON ai_vision_alarms (camera_id, id)"),
+            ("idx_ai_alarm_status", "CREATE INDEX IF NOT EXISTS idx_ai_alarm_status ON ai_vision_alarms (status)"),
+            ("idx_ai_alarm_created", "CREATE INDEX IF NOT EXISTS idx_ai_alarm_created ON ai_vision_alarms (created_at)"),
+            ("idx_ai_alarm_event", "CREATE INDEX IF NOT EXISTS idx_ai_alarm_event ON ai_vision_alarms (event_id)"),
+            ("idx_ai_task_cam_status", "CREATE INDEX IF NOT EXISTS idx_ai_task_cam_status ON ai_vision_tasks (camera_id, status)"),
+            ("idx_ai_task_event", "CREATE INDEX IF NOT EXISTS idx_ai_task_event ON ai_vision_tasks (event_id)"),
+            ("idx_ai_sample_label", "CREATE INDEX IF NOT EXISTS idx_ai_sample_label ON ai_vision_samples (label_status)"),
+            ("idx_ai_sample_folder", "CREATE INDEX IF NOT EXISTS idx_ai_sample_folder ON ai_vision_samples (folder)"),
+            ("idx_ai_sample_cat", "CREATE INDEX IF NOT EXISTS idx_ai_sample_cat ON ai_vision_samples (category_code)"),
+            ("idx_ai_train_status", "CREATE INDEX IF NOT EXISTS idx_ai_train_status ON ai_vision_trainings (status)"),
+            ("idx_ai_evtmodel_event", "CREATE INDEX IF NOT EXISTS idx_ai_evtmodel_event ON ai_vision_event_models (event_id, model_id)"),
+        ]
+        try:
+            async with engine.begin() as conn:
+                # WAL：写事务不再阻塞读（worker 写告警 + API 读并发场景）；
+                # journal_mode 持久化在库文件中，设置一次即长期生效
+                mode = (await conn.execute(text("PRAGMA journal_mode=WAL"))).scalar()
+                logger.info(f"[AIVision] journal_mode = {mode}")
+                for _, ddl in indexes:
+                    await conn.execute(text(ddl))
+                # models.name 唯一索引：先验无重复再加（有重复跳过，绝不改数据）
+                dup = (await conn.execute(
+                    text("SELECT name, COUNT(*) FROM ai_vision_models GROUP BY name HAVING COUNT(*) > 1")
+                )).fetchall()
+                if dup:
+                    logger.warning(f"[AIVision] skip unique index on models.name, duplicates: {dup}")
+                else:
+                    await conn.execute(
+                        text("CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_model_name ON ai_vision_models (name)")
+                    )
+                logger.info(f"[AIVision] indexes ensured ({len(indexes)} + name-unique)")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[AIVision] index migration failed: {exc}")
 
     # ── 生命周期：卸载（清理）────────────────────────
     async def uninstall(self) -> None:
@@ -191,6 +243,15 @@ class AIVisionPlugin(PluginInterface):
                 loop.run_until_complete(get_manager().restore_running_tasks())
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[AIVision] 自动恢复任务失败: {exc}")
+
+        # 训练孤儿回收：重启后 DB 里 running 的训练任务进程已随旧服务消亡，
+        # 标 failed，否则互斥检查永久拒绝新训练（自查 P1-4）
+        try:
+            from src.plugins.builtin.ai_vision.runtime.trainer import get_train_manager
+
+            get_train_manager().recover_orphans()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[AIVision] 训练孤儿回收失败: {exc}")
 
     # ── 生命周期：注册 MCP 工具 ─────────────────────────
     def register_mcp_tools(self) -> None:

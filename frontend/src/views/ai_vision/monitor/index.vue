@@ -310,6 +310,9 @@ const timelineRef = ref<HTMLElement | null>(null)
 
 const timeline = ref<any[]>([])
 let sinceId = 0
+// 时间水位（UTC naive ISO）：批量删除后新告警会复用更小的自增 id，
+// 纯 id 增量会永久漏推，故轮询优先带 since_ts（见后端 alarms-since）
+let sinceTs = ''
 let alarmTimer: number | null = null
 let statusTimer: number | null = null
 let clockTimer: number | null = null
@@ -511,6 +514,7 @@ async function seedTimeline() {
     const res: any = await request.get('/ai-vision/alarms', { params })
     const items: any[] = res.items || []
     sinceId = items.reduce((m, a) => Math.max(m, a.id), 0)
+    sinceTs = items.reduce((m: string, a: any) => (a.created_at && a.created_at > m ? a.created_at : m), '')
     timeline.value = items
       .map((a) => ({
         ...a,
@@ -536,18 +540,24 @@ function snapshotUrl(path: string) {
 async function pollAlarms() {
   try {
     const params: any = { since_id: sinceId, limit: 50 }
+    if (sinceTs) params.since_ts = sinceTs
     if (cameraId.value) params.camera_id = cameraId.value
     const res: any = await alarmsSince(params)
     const items: any[] = res.items || []
     if (res.next_since_id) sinceId = res.next_since_id
+    if (res.next_since_ts) sinceTs = res.next_since_ts
     if (items.length) {
-      // 新告警插到时间线顶部（倒序展示），高亮 3 秒
+      // 时间水位按秒比较，同秒多条会重复命中 → 按 id 去重
+      const seen = new Set(timeline.value.map((t) => t.id))
       const fresh = items
+        .filter((a) => !seen.has(a.id))
         .slice()
         .reverse()
         .map((a) => ({ ...a, _fresh: true }))
-      timeline.value = [...fresh, ...timeline.value].slice(0, 60)
-      setTimeout(() => fresh.forEach((f) => (f._fresh = false)), 3000)
+      if (fresh.length) {
+        timeline.value = [...fresh, ...timeline.value].slice(0, 60)
+        setTimeout(() => fresh.forEach((f) => (f._fresh = false)), 3000)
+      }
     }
   } catch {
     // ignore（避免轮询失败刷屏）

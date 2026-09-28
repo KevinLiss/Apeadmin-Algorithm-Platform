@@ -1382,13 +1382,13 @@ class StreamWorker:
         action_label: 动作识别结果标签（如 diving），附加到告警 note 字段。
         """
         try:
-            snap = self._save_snapshot(task, dets, action_label=action_label)
             # 置信度：告警触发瞬间目标通常已消失（dets 为空）——跳水路径回退到
             # 本轮腾空期最高检测置信度（episode_max_conf），避免落库恒为 0.0
             if dets:
                 conf = round(max(d.conf for d in dets), 4)
             else:
                 conf = round(float(getattr(task.detector, "episode_max_conf", 0.0) or 0.0), 4)
+            snap, clean_snap, boxes = self._save_snapshot(task, dets, action_label=action_label)
             alarm = {
                 "task_id": task.task_id,
                 "event_id": task.event_id,
@@ -1396,6 +1396,8 @@ class StreamWorker:
                 "category_code": task.category_codes[0] if task.category_codes else "",
                 "confidence": conf,
                 "snapshot_path": snap,
+                "clean_snapshot_path": clean_snap,
+                "boxes_json": json.dumps(boxes, ensure_ascii=False) if boxes else "",
                 "video_ts": round(self._video_ts, 2),
                 "level": "warning",
                 "status": "pending",
@@ -1427,15 +1429,24 @@ class StreamWorker:
         (11, 13), (13, 15), (12, 14), (14, 16),
     ]
 
-    def _save_snapshot(self, task: TaskBinding, dets: list[Any], action_label: str = "") -> str:
-        """画框 + 标签（pose 结果附骨架）→ JPEG（quality 85，最多 top-3）→ 绝对路径。"""
+    def _save_snapshot(
+        self, task: TaskBinding, dets: list[Any], action_label: str = ""
+    ) -> tuple[str, str, list[dict]]:
+        """抓拍双份保存：画框图（给人看）+ 干净原图（转样本训练用）。
+
+        返回 (画框图路径, 干净图路径, YOLO 归一化框列表)。框取 top-3（与画框
+        一致），cls_name 即平台类别 code，可直接作为标注 class_name。
+        干净图保存失败时返回空串（转样本降级用画框图）。
+        """
         import cv2
 
         frame = self._last_frame
         if frame is None:
-            return ""
+            return "", "", []
         img = frame.copy()
         top = sorted(dets, key=lambda d: d.conf, reverse=True)[:3]
+        fw, fh = img.shape[1], img.shape[0]
+        boxes: list[dict] = []
         for d in top:
             x1, y1, x2, y2 = [int(v) for v in d.bbox]
             cv2.rectangle(img, (x1, y1), (x2, y2), (0, 165, 255), 2)
@@ -1453,13 +1464,31 @@ class StreamWorker:
                 for p in kpts:
                     if p[2] >= 0.3:
                         cv2.circle(img, (int(p[0]), int(p[1])), 3, (0, 0, 255), -1)
+            # 检测框 → YOLO 归一化标注（转样本自动带框）
+            bw, bh = d.bbox[2] - d.bbox[0], d.bbox[3] - d.bbox[1]
+            if bw > 1 and bh > 1:
+                boxes.append({
+                    "class_name": d.cls_name,
+                    "x": round(max(0.0, min(1.0, (d.bbox[0] + bw / 2) / fw)), 6),
+                    "y": round(max(0.0, min(1.0, (d.bbox[1] + bh / 2) / fh)), 6),
+                    "w": round(max(0.0, min(1.0, bw / fw)), 6),
+                    "h": round(max(0.0, min(1.0, bh / fh)), 6),
+                })
 
         snap_dir = Path(self.uploads_dir) / "ai_vision" / "snapshots" / str(self.camera_id)
         snap_dir.mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y%m%d_%H%M%S")
         path = snap_dir / f"{ts}_{task.event_id}.jpg"
         cv2.imwrite(str(path), img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-        return str(path)
+
+        clean_path = snap_dir / f"{ts}_{task.event_id}_clean.jpg"
+        clean = ""
+        try:
+            cv2.imwrite(str(clean_path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+            clean = str(clean_path)
+        except Exception:  # noqa: BLE001
+            pass
+        return str(path), clean, boxes
 
     def _db_insert_alarm(self, alarm: dict) -> int | None:
         """独立同步 Session 写库（不阻塞事件循环），返回新告警 ID。"""

@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.deps import get_current_user
@@ -104,7 +104,7 @@ async def list_tasks(
         stmt = stmt.where(AIVisionTask.camera_id == camera_id)
     if event_id:
         stmt = stmt.where(AIVisionTask.event_id == event_id)
-    total = len((await db.execute(stmt)).scalars().all())
+    total = (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar() or 0
     stmt = stmt.order_by(AIVisionTask.id.desc()).offset((page - 1) * page_size).limit(page_size)
     items = (await db.execute(stmt)).scalars().all()
 

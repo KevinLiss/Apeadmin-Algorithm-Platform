@@ -34,7 +34,10 @@
     <!-- 批量操作 -->
     <div class="batch-bar" v-if="selected.length > 0">
       <el-text size="small">已选 {{ selected.length }} 条</el-text>
-      <el-button size="small" type="primary" @click="handleBatchAck" v-permission="'ai_vision:alarm:edit'">批量确认</el-button>
+      <el-button size="small" type="primary" :loading="batchActing" @click="handleBatchAck" v-permission="'ai_vision:alarm:edit'">批量确认</el-button>
+      <el-button size="small" type="warning" :loading="batchActing" @click="handleBatchFalsePositive" v-permission="'ai_vision:alarm:edit'">批量误报</el-button>
+      <el-button size="small" type="success" :loading="batchActing" @click="handleBatchToSample" v-permission="'ai_vision:alarm:edit'">批量转样本</el-button>
+      <el-button size="small" type="danger" :loading="batchActing" @click="handleBatchDelete" v-permission="'ai_vision:alarm:edit'">批量删除</el-button>
     </div>
 
     <!-- 列表 -->
@@ -128,6 +131,7 @@ const router = useRouter()
 const loading = ref(false)
 const tableData = ref<any[]>([])
 const selected = ref<any[]>([])
+const batchActing = ref(false)
 const total = ref(0)
 const page = ref(1)
 const pageSize = ref(20)
@@ -273,11 +277,95 @@ async function handleDelete(row: any) {
 }
 
 async function handleBatchAck() {
-  const ids = selected.value.map((r) => r.id)
-  await request.post('/ai-vision/alarms/batch-ack', null, { params: { alarm_ids: ids } })
-  ElMessage.success('批量确认完成')
+  // 仅「待处理」可确认，其余状态跳过并明确提示（否则用户点了看不到变化）
+  const targets = selected.value.filter((r) => r.status === 'pending')
+  const skipped = selected.value.length - targets.length
+  if (skipped > 0) ElMessage.info(`已跳过 ${skipped} 条非待处理告警`)
+  await batchRun(targets, 'ack', '确认')
+}
+
+async function handleBatchFalsePositive() {
+  const targets = selected.value.filter((r) => r.status !== 'false_positive')
+  const skipped = selected.value.length - targets.length
+  if (skipped > 0) ElMessage.info(`已跳过 ${skipped} 条已是误报的告警`)
+  if (targets.length === 0) return
+  let note = ''
+  try {
+    const { value } = await ElMessageBox.prompt(
+      `将把选中的 ${targets.length} 条告警标记为误报，可填写误报原因（可选，统一应用）`,
+      '批量误报',
+      { confirmButtonText: '确定', cancelButtonText: '取消', inputPlaceholder: '如：灯光反光误触发' },
+    )
+    note = value || ''
+  } catch {
+    return // 取消
+  }
+  await batchRun(targets, 'false-positive', '标记误报', note)
+}
+
+async function handleBatchToSample() {
+  // 与单行按钮一致：仅已确认/误报可转样本；无抓拍图的也跳过
+  const targets = selected.value.filter(
+    (r) => ['acknowledged', 'false_positive'].includes(r.status) && r.snapshot_path,
+  )
+  const skipped = selected.value.length - targets.length
+  if (skipped > 0) {
+    ElMessage.info(`已跳过 ${skipped} 条（待处理告警需先确认/标误报，或无抓拍图）`)
+  }
+  if (targets.length === 0) return
+  try {
+    await ElMessageBox.confirm(`将选中的 ${targets.length} 条告警抓拍图转入样本库？`, '批量转样本', { type: 'info' })
+  } catch {
+    return // 取消
+  }
+  await batchRun(targets, 'to-sample', '转样本')
+}
+
+async function handleBatchDelete() {
+  const targets = [...selected.value]
+  try {
+    await ElMessageBox.confirm(
+      `确定删除选中的 ${targets.length} 条告警？抓拍图将一并删除，且不可恢复。`,
+      '批量删除告警',
+      { type: 'warning', confirmButtonText: '删除', confirmButtonClass: 'el-button--danger' },
+    )
+  } catch {
+    return // 取消
+  }
+  await batchRun(targets, 'delete', '删除')
+}
+
+/**
+ * 批量串行执行：逐条调用单条接口（复用后端的状态校验与抓拍图删除逻辑），
+ * 统计成功/失败并一次性反馈，避免"点了没反应"。
+ */
+async function batchRun(rows: any[], op: string, label: string, note = '') {
+  if (rows.length === 0) {
+    ElMessage.warning('没有可执行的告警（请检查勾选行的状态）')
+    return
+  }
+  batchActing.value = true
+  let ok = 0
+  let fail = 0
+  for (const r of rows) {
+    try {
+      if (op === 'false-positive') {
+        await request.post(`/ai-vision/alarms/${r.id}/false-positive`, null, { params: { note } })
+      } else if (op === 'delete') {
+        await request.delete(`/ai-vision/alarms/${r.id}`)
+      } else {
+        await request.post(`/ai-vision/alarms/${r.id}/${op}`)
+      }
+      ok++
+    } catch {
+      fail++
+    }
+  }
+  batchActing.value = false
   selected.value = []
   await fetchList()
+  if (fail === 0) ElMessage.success(`已批量${label} ${ok} 条告警`)
+  else ElMessage.warning(`批量${label}完成：成功 ${ok} 条，失败 ${fail} 条`)
 }
 
 onMounted(() => {
@@ -294,7 +382,11 @@ onMounted(() => {
 .page-header h2 { margin: 0 0 4px; font-size: 20px; }
 .page-header .text-muted { color: #999; font-size: 13px; margin: 0; }
 .filter-bar { margin-bottom: 4px; }
-.batch-bar { display: flex; align-items: center; gap: 12px; margin: 8px 0; }
+.batch-bar {
+  margin-top: 8px; display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; background: var(--el-color-primary-light-9, #ecf5ff);
+  border: 1px solid var(--el-color-primary-light-7, #c6e2ff); border-radius: 6px;
+}
 /* 勾选框边框加深——与任务页一致，默认色在白色行上太浅 */
 .alarm-page :deep(.el-checkbox__inner) {
   border-color: #909399;

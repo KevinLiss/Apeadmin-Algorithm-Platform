@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.deps import get_current_user
@@ -92,7 +92,10 @@ async def list_alarms(
     if end_at:
         stmt = stmt.where(AIVisionAlarm.created_at <= end_at)
 
-    total = len((await db.execute(stmt)).scalars().all())
+    # COUNT 聚合（原为全行载入内存取 len，告警增长后翻页显著变慢）
+    total = (await db.execute(
+        select(func.count()).select_from(stmt.subquery())
+    )).scalar() or 0
     stmt = stmt.order_by(AIVisionAlarm.id.desc()).offset((page - 1) * page_size).limit(page_size)
     items = (await db.execute(stmt)).scalars().all()
 
@@ -167,14 +170,30 @@ async def alarm_to_sample(
     user: Annotated[User, Depends(get_current_user)],
     _perm: Annotated[User, Depends(_require_perm("ai_vision:alarm:edit"))],
 ):
-    """误报/告警转样本：复制抓拍图到 samples 目录 + 建样本记录。"""
-    item = await _get_alarm_or_404(db, alarm_id)
-    if not item.snapshot_path:
-        raise HTTPException(status_code=400, detail="该告警无抓拍图，无法转样本")
+    """误报/告警转样本：复制抓拍图到 samples 目录 + 建样本记录。
 
-    src = Path(item.snapshot_path)
-    if not src.exists():
-        raise HTTPException(status_code=400, detail=f"抓拍图不存在: {item.snapshot_path}")
+    优先复制**干净原图**（无烧录框，训练可用）并携带告警触发时刻的
+    检测框作为初始标注（label_status=labeled，转完即训）；旧告警无
+    干净图/框数据时降级复制画框图、状态为未标注（与历史行为一致）。
+    """
+    item = await _get_alarm_or_404(db, alarm_id)
+    src_clean = Path(item.clean_snapshot_path) if getattr(item, "clean_snapshot_path", "") else None
+    src_marked = Path(item.snapshot_path) if item.snapshot_path else None
+    src = src_clean if (src_clean and src_clean.exists()) else src_marked
+    if not src or not src.exists():
+        raise HTTPException(status_code=400, detail="该告警无可用抓拍图，无法转样本")
+
+    # 解析触发时刻检测框（仅干净图才自动带标注；画框图带框会双重污染）
+    boxes: list[dict] = []
+    if src is src_clean and getattr(item, "boxes_json", ""):
+        try:
+            parsed = json.loads(item.boxes_json)
+            if isinstance(parsed, list):
+                for b in parsed:
+                    if all(k in b for k in ("class_name", "x", "y", "w", "h")):
+                        boxes.append(b)
+        except (ValueError, TypeError):
+            boxes = []
 
     # 复制到 samples 目录（目录按事件组织）
     sample_dir = _SAMPLES_DIR / str(item.event_id)
@@ -196,8 +215,8 @@ async def alarm_to_sample(
     sample = AIVisionSample(
         file_path=str(dst),
         source="alarm",
-        label_status="unlabeled",
-        label_data="{}",
+        label_status="labeled" if boxes else "unlabeled",
+        label_data=json.dumps({"boxes": boxes}, ensure_ascii=False) if boxes else "{}",
         category_code=item.category_code,
         related_event_id=item.event_id,
         width=width,
@@ -206,7 +225,8 @@ async def alarm_to_sample(
     db.add(sample)
     await db.commit()
     await db.refresh(sample)
-    return success_response(data=_sample_out(sample), msg="已转样本")
+    msg = f"已转样本（自动携带 {len(boxes)} 个检测框标注）" if boxes else "已转样本"
+    return success_response(data=_sample_out(sample), msg=msg)
 
 
 @router.delete("/{alarm_id}")
@@ -216,14 +236,16 @@ async def delete_alarm(
     user: Annotated[User, Depends(get_current_user)],
     _perm: Annotated[User, Depends(_require_perm("ai_vision:alarm:edit"))],
 ):
-    """删除告警记录（连带删除其抓拍图文件；转样本的副本不受影响）。"""
+    """删除告警记录（连带删除其抓拍图与干净图文件；转样本的副本不受影响）。"""
     item = await _get_alarm_or_404(db, alarm_id)
-    if item.snapshot_path:
+    for p in (item.snapshot_path, getattr(item, "clean_snapshot_path", "")):
+        if not p:
+            continue
         try:
-            snap = Path(item.snapshot_path)
+            snap = Path(p)
             if snap.exists():
                 snap.unlink()
-        except OSError:
+        except BaseException:  # noqa: BLE001 — 删除保护钩子可能抛 SystemExit，不可杀进程
             pass  # 文件删除失败不阻塞记录删除
     await db.delete(item)
     await db.commit()

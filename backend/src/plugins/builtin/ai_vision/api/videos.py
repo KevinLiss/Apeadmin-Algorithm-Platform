@@ -36,6 +36,15 @@ def videos_dir() -> Path:
     return UPLOADS_AI_VISION_DIR / "videos"
 
 
+def _safe_unlink(p: Path) -> None:
+    """删除文件但吞掉一切异常（含托管环境删除保护钩子的 SystemExit，
+    只捕 Exception 会杀死 API 进程，2026-09-28 实锤）。"""
+    try:
+        p.unlink(missing_ok=True)
+    except BaseException:  # noqa: BLE001
+        pass
+
+
 @router.post("/upload")
 async def upload_video(
     file: Annotated[UploadFile, File(description="视频文件（mp4/avi/mkv/mov/flv/wmv/webm）")],
@@ -79,10 +88,10 @@ async def upload_video(
                     )
                 f.write(chunk)
     except HTTPException:
-        dest.unlink(missing_ok=True)
+        _safe_unlink(dest)
         raise
     except Exception as exc:
-        dest.unlink(missing_ok=True)
+        _safe_unlink(dest)
         raise HTTPException(status_code=500, detail=f"保存失败: {exc}") from exc
 
     return success_response(

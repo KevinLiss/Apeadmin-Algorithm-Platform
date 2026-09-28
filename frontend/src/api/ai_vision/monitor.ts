@@ -2,7 +2,7 @@
 import request from '@/api/request'
 
 // 增量拉取告警（id > since_id），供监控台时间线轮询
-export function alarmsSince(params: { since_id: number; camera_id?: number; limit?: number }) {
+export function alarmsSince(params: { since_id: number; since_ts?: string; camera_id?: number; limit?: number }) {
   return request.get('/ai-vision/monitor/alarms-since', { params })
 }
 

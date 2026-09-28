@@ -167,6 +167,8 @@ class ModelOut(BaseModel):
     parent_model_id: int | None
     license_note: str
     version: str
+    pt_path: str = ""
+    category_map: str = "{}"
     created_at: datetime
 
 
@@ -219,8 +221,59 @@ class SampleOut(BaseModel):
     file_path: str
     source: str
     label_status: str
+    label_data: str = "{}"
     category_code: str
+    folder: str = ""
     related_event_id: int | None
     width: int
     height: int
+    created_at: datetime
+
+
+class SampleBox(BaseModel):
+    """单个标注框（YOLO 归一化坐标：中心点 + 宽高，0~1）。"""
+
+    class_name: str = Field(..., min_length=1, max_length=50, description="类别名（基座模型 names 之一）")
+    x: float = Field(..., ge=0.0, le=1.0)
+    y: float = Field(..., ge=0.0, le=1.0)
+    w: float = Field(..., gt=0.0, le=1.0)
+    h: float = Field(..., gt=0.0, le=1.0)
+
+
+class SampleLabelUpdate(BaseModel):
+    """保存样本标注：boxes 为空即视为取消标注（回到 unlabeled）。"""
+
+    boxes: list[SampleBox] = Field(default_factory=list)
+
+
+class TrainJobCreate(BaseModel):
+    """发起训练任务。"""
+
+    base_model_id: int = Field(..., ge=1, description="基座模型（须有 pt_path 与类别表）")
+    category_codes: list[str] = Field(..., min_length=1, description="参与训练的类别（顺序即新模型 names 顺序）")
+    folder: str = Field(default="", max_length=100, description="限定样本分组（空=全库；__none__=未分组）")
+    sample_ids: list[int] = Field(default_factory=list, description="手动勾选的样本 ID（非空则优先于 folder）")
+    output_name: str = Field(default="", max_length=60, description="产物模型名（空=自动 基座名-ftN；重名自动加序号）")
+    epochs: int = Field(default=30, ge=1, le=300)
+    imgsz: int = Field(default=416, ge=128, le=1280)
+    batch: int = Field(default=4, ge=1, le=16)
+    lr0: float = Field(default=0.01, gt=0.0, le=0.1)
+    val_split: float = Field(default=0.2, ge=0.05, le=0.5, description="验证集划分比例")
+    note: str = Field(default="", max_length=200)
+
+
+class TrainingOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    event_id: int
+    base_model_id: int | None
+    sample_ids: str
+    params: str
+    status: str
+    progress: int
+    metrics: str
+    output_model_id: int | None
+    log_path: str
+    started_at: datetime | None
+    finished_at: datetime | None
     created_at: datetime

@@ -54,11 +54,28 @@ async def alarms_since(
     user: Annotated[User, Depends(get_current_user)],
     _perm: Annotated[User, Depends(_require_perm("ai_vision:alarm:list"))],
     since_id: int = Query(default=0, ge=0, description="只返回 id 大于该值的告警"),
+    since_ts: str = Query(default="", max_length=40, description="只返回 created_at 晚于该 UTC 时刻的告警（优先于 since_id）"),
     camera_id: int | None = Query(default=None, ge=1),
     limit: int = Query(default=50, ge=1, le=200),
 ):
-    """增量拉取告警（按 id 升序），附摄像头名/事件名/抓拍图 URL/视频时间戳来源。"""
-    stmt = select(AIVisionAlarm).where(AIVisionAlarm.id > since_id)
+    """增量拉取告警（按 id 升序），附摄像头名/事件名/抓拍图 URL/视频时间戳来源。
+
+    水位优先用 since_ts（时间）：批量删除旧告警后 SQLite 会复用自增 id，
+    新告警 id 可能小于页面持有的 id 水位，纯 id 增量会永久漏推（2026-09-28 实修）。
+    """
+    stmt = select(AIVisionAlarm)
+    watermark_dt: datetime | None = None
+    if since_ts:
+        try:
+            watermark_dt = datetime.fromisoformat(since_ts.replace("Z", "+00:00"))
+            if watermark_dt.tzinfo is not None:
+                watermark_dt = watermark_dt.astimezone(timezone.utc).replace(tzinfo=None)
+        except ValueError:
+            watermark_dt = None
+    if watermark_dt is not None:
+        stmt = stmt.where(AIVisionAlarm.created_at > watermark_dt)
+    else:
+        stmt = stmt.where(AIVisionAlarm.id > since_id)
     if camera_id:
         stmt = stmt.where(AIVisionAlarm.camera_id == camera_id)
     stmt = stmt.order_by(AIVisionAlarm.id.asc()).limit(limit)
@@ -104,7 +121,11 @@ async def alarms_since(
             "video_ts": a.video_ts or 0.0,
             "created_at": a.created_at.isoformat() if a.created_at else None,
         })
-    return success_response(data={"items": out, "next_since_id": items[-1].id if items else since_id})
+    return success_response(data={
+        "items": out,
+        "next_since_id": items[-1].id if items else since_id,
+        "next_since_ts": max((o["created_at"] for o in out if o["created_at"]), default=since_ts),
+    })
 
 
 @router.get("/status")
