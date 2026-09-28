@@ -37,7 +37,8 @@
         </template>
       </el-table-column>
       <el-table-column prop="last_online_at" label="最近在线" width="170">
-        <template #default="{ row }">{{ row.last_online_at || '—' }}</template>
+        <!-- 状态"未知"（从未监控/未测试成功）时不显示历史残留时间 -->
+        <template #default="{ row }">{{ row.status === 'unknown' ? '—' : formatDateTime(row.last_online_at) }}</template>
       </el-table-column>
       <el-table-column label="操作" width="300" fixed="right">
         <template #default="{ row }">
@@ -167,6 +168,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh, Upload } from '@element-plus/icons-vue'
 import request from '@/api/request'
+import { formatDateTime } from '@/utils/time'
 
 const router = useRouter()
 

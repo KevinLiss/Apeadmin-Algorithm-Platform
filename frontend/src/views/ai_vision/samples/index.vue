@@ -69,7 +69,7 @@
           />
           <div class="sample-info">
             <div class="sample-row">
-              <el-tag size="small" type="warning">{{ s.category_code || '未分类' }}</el-tag>
+              <el-tag size="small" type="warning">{{ categoryName(s.category_code) }}</el-tag>
               <el-tag size="small" :type="s.source === 'upload' ? 'primary' : 'success'">
                 {{ s.source === 'upload' ? '上传' : '告警' }}
               </el-tag>
@@ -142,6 +142,12 @@ function imageUrl(path: string) {
   const idx = path.lastIndexOf('ai_vision')
   if (idx >= 0) return '/api/v1/ai-vision/media/' + path.slice(idx + 'ai_vision/'.length).replace(/\\/g, '/')
   return ''
+}
+
+/** 类别 code → 中文名（未匹配回退 code 本身） */
+function categoryName(code: string) {
+  if (!code) return '未分类'
+  return categories.value.find((c) => c.code === code)?.name || code
 }
 
 async function fetchCategories() {

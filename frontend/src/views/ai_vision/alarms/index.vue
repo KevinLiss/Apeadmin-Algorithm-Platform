@@ -62,7 +62,7 @@
       </el-table-column>
       <el-table-column label="类别" width="100">
         <template #default="{ row }">
-          <el-tag size="small" type="warning">{{ row.category_code }}</el-tag>
+          <el-tag size="small" type="warning">{{ categoryName(row.category_code) }}</el-tag>
         </template>
       </el-table-column>
       <el-table-column label="置信度" width="90">
@@ -70,7 +70,7 @@
       </el-table-column>
       <el-table-column label="级别" width="80">
         <template #default="{ row }">
-          <el-tag size="small" :type="row.level === 'critical' ? 'danger' : 'warning'">{{ row.level }}</el-tag>
+          <el-tag size="small" :type="levelType(row.level)">{{ levelText(row.level) }}</el-tag>
         </template>
       </el-table-column>
       <el-table-column label="状态" width="100">
@@ -78,7 +78,9 @@
           <el-tag size="small" :type="statusType(row.status)">{{ statusText(row.status) }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="created_at" label="告警时间" width="170" />
+      <el-table-column label="告警时间" width="170">
+        <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
+      </el-table-column>
       <el-table-column label="操作" width="250" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="handleAck(row)" v-if="row.status === 'pending'" v-permission="'ai_vision:alarm:edit'">确认</el-button>
@@ -119,6 +121,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, ArrowRight } from '@element-plus/icons-vue'
 import { useRouter } from 'vue-router'
 import request from '@/api/request'
+import { formatDateTime } from '@/utils/time'
 
 const router = useRouter()
 
@@ -130,6 +133,7 @@ const page = ref(1)
 const pageSize = ref(20)
 const cameras = ref<any[]>([])
 const events = ref<any[]>([])
+const categories = ref<any[]>([])
 
 const filters = reactive({
   status: '',
@@ -143,6 +147,20 @@ function statusType(s: string) {
 
 function statusText(s: string) {
   return { pending: '待处理', acknowledged: '已确认', false_positive: '误报' }[s] || s
+}
+
+/** 类别 code → 中文名（未匹配回退 code 本身） */
+function categoryName(code: string) {
+  return categories.value.find((c) => c.code === code)?.name || code || '—'
+}
+
+/** 告警级别 → 中文 */
+function levelText(s: string) {
+  return { critical: '紧急', warning: '警告', info: '提示' }[s] || s
+}
+
+function levelType(s: string) {
+  return s === 'critical' ? 'danger' : s === 'warning' ? 'warning' : 'info'
 }
 
 // 抓拍图相对路径 → 可访问 URL（静态挂载 /api/v1/ai-vision/media）
@@ -166,6 +184,15 @@ async function fetchEvents() {
   try {
     const res: any = await request.get('/ai-vision/events', { params: { page: 1, page_size: 100 } })
     events.value = res.items || []
+  } catch {
+    // handled by interceptor
+  }
+}
+
+async function fetchCategories() {
+  try {
+    const res: any = await request.get('/ai-vision/categories', { params: { page: 1, page_size: 100 } })
+    categories.value = res.items || []
   } catch {
     // handled by interceptor
   }
@@ -257,6 +284,7 @@ onMounted(() => {
   fetchList()
   fetchCameras()
   fetchEvents()
+  fetchCategories()
 })
 </script>
 
@@ -267,6 +295,13 @@ onMounted(() => {
 .page-header .text-muted { color: #999; font-size: 13px; margin: 0; }
 .filter-bar { margin-bottom: 4px; }
 .batch-bar { display: flex; align-items: center; gap: 12px; margin: 8px 0; }
+/* 勾选框边框加深——与任务页一致，默认色在白色行上太浅 */
+.alarm-page :deep(.el-checkbox__inner) {
+  border-color: #909399;
+}
+.alarm-page :deep(.el-checkbox__inner:hover) {
+  border-color: var(--el-color-primary, #409eff);
+}
 .empty-tip { color: #909399; font-size: 13px; margin: 0 0 12px; }
 .pagination { margin-top: 16px; display: flex; justify-content: flex-end; }
 </style>

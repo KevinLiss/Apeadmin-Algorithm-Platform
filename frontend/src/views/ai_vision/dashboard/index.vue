@@ -224,6 +224,13 @@ const hasAlarm = ref(false)
 
 const runtime = ref<any>({})
 const overview = ref<any>({})
+const categories = ref<any[]>([])
+
+/** 类别 code → 中文名（饼图图例用；未匹配回退原值） */
+function categoryName(code: string) {
+  if (!code || code === 'unknown') return '未知'
+  return categories.value.find((c) => c.code === code)?.name || code
+}
 
 const trendRef = ref<HTMLElement | null>(null)
 const distRef = ref<HTMLElement | null>(null)
@@ -324,9 +331,9 @@ function renderCharts() {
   })
   charts.push(c1)
 
-  // 告警类别分布
+  // 告警类别分布（code → 中文名）
   const distData = (overview.value.event_distribution || []).map((d: any) => ({
-    name: d.category || 'unknown',
+    name: categoryName(d.category),
     value: d.count,
   }))
   const c2 = echarts.init(distEl)
@@ -397,7 +404,17 @@ function startPoll() {
   pollTimer = window.setInterval(tick, 30000)
 }
 
+async function fetchCategories() {
+  try {
+    const res: any = await request.get('/ai-vision/categories', { params: { page: 1, page_size: 100 } })
+    categories.value = res.items || []
+  } catch {
+    // handled by interceptor
+  }
+}
+
 onMounted(async () => {
+  await fetchCategories() // 先于 detect：保证首帧饼图渲染时类别映射已就绪
   await detect()
   if (ready.value) startPoll()
   window.addEventListener('resize', handleResize)

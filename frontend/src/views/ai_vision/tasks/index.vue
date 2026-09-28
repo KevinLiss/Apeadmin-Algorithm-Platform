@@ -15,8 +15,17 @@
       </el-button>
     </div>
 
+    <!-- 批量操作条（勾选后出现；表头复选框可全选本页） -->
+    <div class="batch-bar" v-if="selected.length > 0">
+      <el-text size="small">已选 {{ selected.length }} 个任务</el-text>
+      <el-button size="small" type="success" :loading="batchActing" @click="handleBatchStart" v-permission="'ai_vision:task:control'">批量启动</el-button>
+      <el-button size="small" type="warning" :loading="batchActing" @click="handleBatchStop" v-permission="'ai_vision:task:control'">批量停止</el-button>
+      <el-button size="small" type="danger" :loading="batchActing" @click="handleBatchDelete" v-permission="'ai_vision:task:delete'">批量删除</el-button>
+    </div>
+
     <!-- 列表 -->
-    <el-table v-if="total > 0 || loading" :data="tableData" v-loading="loading" stripe style="width: 100%; margin-top: 16px">
+    <el-table v-if="total > 0 || loading" :data="tableData" v-loading="loading" stripe style="width: 100%; margin-top: 16px" @selection-change="(rows: any[]) => (selected = rows)">
+      <el-table-column type="selection" width="45" />
       <el-table-column prop="id" label="ID" width="60" />
       <el-table-column label="摄像头" min-width="130">
         <template #default="{ row }">{{ row.camera_name || `#${row.camera_id}` }}</template>
@@ -42,11 +51,12 @@
         </template>
       </el-table-column>
       <el-table-column prop="started_at" label="启动时间" width="170">
-        <template #default="{ row }">{{ row.started_at || '—' }}</template>
+        <template #default="{ row }">{{ formatDateTime(row.started_at) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="200" fixed="right">
+      <el-table-column label="操作" width="230" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="openStats(row)" v-permission="'ai_vision:task:list'">详情</el-button>
+          <el-button link type="success" size="small" @click="handleStart(row)" v-if="row.status !== 'running'" :loading="actingId === row.id" v-permission="'ai_vision:task:control'">启动</el-button>
           <el-button link type="warning" size="small" @click="handleStop(row)" v-if="row.status === 'running'" :loading="actingId === row.id" v-permission="'ai_vision:task:control'">停止</el-button>
           <el-button link type="danger" size="small" @click="handleDelete(row)" v-permission="'ai_vision:task:delete'">删除</el-button>
         </template>
@@ -147,6 +157,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import request from '@/api/request'
+import { formatDateTime } from '@/utils/time'
 
 const router = useRouter()
 const route = useRoute()
@@ -154,6 +165,8 @@ const route = useRoute()
 const loading = ref(false)
 const saving = ref(false)
 const actingId = ref<number | null>(null)
+const selected = ref<any[]>([])
+const batchActing = ref(false)
 const tableData = ref<any[]>([])
 const total = ref(0)
 const page = ref(1)
@@ -278,6 +291,77 @@ async function openStats(row: any) {
   }
 }
 
+async function handleStart(row: any) {
+  actingId.value = row.id
+  try {
+    await request.post(`/ai-vision/tasks/${row.id}/start`)
+    ElMessage.success('任务已启动')
+    await fetchList()
+  } catch {
+    // handled by interceptor
+  } finally {
+    actingId.value = null
+  }
+}
+
+/**
+ * 批量执行：串行逐个调用（启动会拉起 worker 抢 CPU，并行易过载），
+ * 统计成功/失败数。filter 决定纳入哪些任务，op 决定调 start/stop/delete。
+ */
+async function batchRun(
+  rows: any[],
+  op: 'start' | 'stop' | 'delete',
+) {
+  if (rows.length === 0) {
+    ElMessage.warning('没有可执行该操作的任务')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确定对 ${rows.length} 个任务执行「${op === 'start' ? '启动' : op === 'stop' ? '停止' : '删除'}」吗？`,
+      '批量操作',
+      { type: op === 'delete' ? 'warning' : 'info' },
+    )
+  } catch {
+    return // 取消
+  }
+  batchActing.value = true
+  let ok = 0
+  let fail = 0
+  for (const r of rows) {
+    try {
+      if (op === 'start') await request.post(`/ai-vision/tasks/${r.id}/start`)
+      else if (op === 'stop') await request.post(`/ai-vision/tasks/${r.id}/stop`)
+      else await request.delete(`/ai-vision/tasks/${r.id}`)
+      ok++
+    } catch {
+      fail++
+    }
+  }
+  batchActing.value = false
+  selected.value = []
+  await fetchList()
+  const label = op === 'start' ? '启动' : op === 'stop' ? '停止' : '删除'
+  if (fail === 0) ElMessage.success(`已批量${label} ${ok} 个任务`)
+  else ElMessage.warning(`批量${label}完成：成功 ${ok}，失败 ${fail}（运行中不可删除等）`)
+}
+
+function handleBatchStart() {
+  // 仅对非运行中任务启动
+  batchRun(selected.value.filter((r) => r.status !== 'running'), 'start')
+}
+function handleBatchStop() {
+  // 仅对运行中任务停止
+  batchRun(selected.value.filter((r) => r.status === 'running'), 'stop')
+}
+function handleBatchDelete() {
+  // 运行中任务不可删除，过滤掉并提示
+  const deletable = selected.value.filter((r) => r.status !== 'running')
+  const skipped = selected.value.length - deletable.length
+  if (skipped > 0) ElMessage.info(`已跳过 ${skipped} 个运行中任务（需先停止）`)
+  batchRun(deletable, 'delete')
+}
+
 async function handleStop(row: any) {
   try {
     await ElMessageBox.confirm(`确定停止任务「#${row.id} ${row.camera_name || ''} × ${row.event_name || ''}」吗？`, '提示', { type: 'warning' })
@@ -325,6 +409,18 @@ onMounted(() => {
 .page-header h2 { margin: 0 0 4px; font-size: 20px; }
 .page-header .text-muted { color: #999; font-size: 13px; margin: 0; }
 .toolbar { display: flex; gap: 8px; }
+.batch-bar {
+  margin-top: 12px; display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; background: var(--el-color-primary-light-9, #ecf5ff);
+  border: 1px solid var(--el-color-primary-light-7, #c6e2ff); border-radius: 6px;
+}
+/* 勾选框边框加深——默认 #dcdfe6 在白色/斑马纹行上几乎不可见 */
+.task-page :deep(.el-checkbox__inner) {
+  border-color: #909399;
+}
+.task-page :deep(.el-checkbox__inner:hover) {
+  border-color: var(--el-color-primary, #409eff);
+}
 .pagination { margin-top: 16px; display: flex; justify-content: flex-end; }
 .stats-footer { margin-top: 16px; display: flex; align-items: center; justify-content: space-between; }
 .empty-tip { color: #909399; font-size: 13px; margin: 0 0 12px; }
