@@ -10,7 +10,7 @@
   <div class="monitor-page">
     <div class="page-header">
       <h2>实时监控台</h2>
-      <p class="text-muted">选择视频源与识别事件，一键开始监控；告警实时推送并支持内联处置</p>
+      <p class="text-muted">左侧任务轨：拨开关启停检测、点卡片切换画面；告警实时推送并支持内联处置</p>
     </div>
 
     <el-tabs v-model="activeTab">
@@ -52,67 +52,57 @@
           </el-col>
         </el-row>
 
-        <!-- 控制栏：源 × 事件 × 启停 -->
-        <el-card shadow="never" class="control-bar">
-          <div class="control-row">
-            <div class="control-item">
-              <span class="control-label">视频源</span>
-              <el-select
-                v-model="cameraId"
-                placeholder="选择摄像头 / 视频文件"
-                filterable
-                style="width: 220px"
-                :disabled="monitoring || acting"
-                @change="handleCameraChange"
-              >
-                <el-option
-                  v-for="c in cameras"
-                  :key="c.id"
-                  :label="`${c.name}（${c.source_type === 'video' ? '视频文件' : 'RTSP'}）`"
-                  :value="c.id"
-                />
-              </el-select>
+        <!-- 主区：左监控轨 / 中视频窗口 / 右信息 + 告警时间线 -->
+        <div class="main-flex">
+          <!-- ── 左侧监控轨：全部任务卡片（开关=启停，点卡片=切画面）── -->
+          <div class="task-rail">
+            <div class="rail-header">
+              <span class="rail-title">监控任务 <el-text size="small" type="info">({{ taskCards.length }})</el-text></span>
+              <div class="rail-actions">
+                <el-button link type="success" size="small" :disabled="railActing" @click="railBatch('start')" v-permission="'ai_vision:task:control'">全启</el-button>
+                <el-button link type="warning" size="small" :disabled="railActing" @click="railBatch('stop')" v-permission="'ai_vision:task:control'">全停</el-button>
+                <el-button link size="small" :loading="railLoading" @click="fetchTaskCards()">刷新</el-button>
+              </div>
             </div>
-            <div class="control-item">
-              <span class="control-label">识别事件</span>
-              <el-select
-                v-model="eventIds"
-                multiple
-                collapse-tags
-                collapse-tags-tooltip
-                placeholder="选择事件（可多选）"
-                style="width: 280px"
-                :disabled="monitoring || acting"
+            <div class="rail-list" v-loading="railLoading">
+              <el-empty v-if="!taskCards.length && !railLoading" description="暂无任务，去「任务管理」新建" :image-size="50" />
+              <div
+                v-for="t in taskCards"
+                :key="t.id"
+                class="task-card"
+                :class="{ active: isCardActive(t), stopped: t.status !== 'running' }"
+                @click="selectCard(t)"
               >
-                <el-option
-                  v-for="e in events"
-                  :key="e.id"
-                  :label="eventLabel(e)"
-                  :value="e.id"
-                  :disabled="e.status !== 'ready' && e.status !== 'running'"
-                >
-                  <el-tooltip :content="eventDisabledReason(e)" :disabled="e.status === 'ready' || e.status === 'running'" placement="right">
-                    <span>{{ eventLabel(e) }}</span>
-                  </el-tooltip>
-                </el-option>
-              </el-select>
-            </div>
-            <div class="control-item">
-              <el-button v-if="!monitoring" type="primary" :loading="acting" :disabled="!cameraId || eventIds.length === 0" @click="startMonitor">
-                <el-icon><VideoPlay /></el-icon> 开始监控
-              </el-button>
-              <el-button v-else type="danger" plain :loading="acting" @click="stopMonitor">
-                <el-icon><VideoPause /></el-icon> 停止监控
-              </el-button>
-              <el-tag v-if="monitoring" type="success" effect="dark" class="live-tag">
-                <span class="live-dot"></span> LIVE
-              </el-tag>
+                <div class="tc-row1">
+                  <span class="tc-dot" :class="t.status === 'running' ? 'dot-run' : t.status === 'degraded' ? 'dot-warn' : 'dot-idle'"></span>
+                  <span class="tc-name" :title="`${t.camera_name} · ${t.event_name}`">{{ t.camera_name }}</span>
+                  <el-switch
+                    :model-value="t.status === 'running'"
+                    size="small"
+                    :loading="t._toggling"
+                    @click.stop
+                    @change="(v: boolean) => toggleCard(t, v)"
+                  />
+                </div>
+                <div class="tc-row2">
+                  <span class="tc-event">{{ t.event_name }}</span>
+                </div>
+                <div class="tc-row3">
+                  <template v-if="t.status === 'running'">
+                    <span>{{ t.last_stats?.fps_actual != null ? Number(t.last_stats.fps_actual).toFixed(1) : '—' }} fps</span>
+                    <span class="tc-sep">·</span>
+                    <span>今日 <b :class="{ 'tc-alarm-hot': (t.today_alarms ?? 0) > 0 }">{{ t.today_alarms ?? 0 }}</b> 告警</span>
+                  </template>
+                  <template v-else>
+                    <span>已停止</span>
+                  </template>
+                </div>
+              </div>
             </div>
           </div>
-        </el-card>
 
-        <!-- 主区：左视频窗口 / 右信息 + 告警时间线 -->
-        <el-row :gutter="16" class="main-row">
+          <!-- ── 中+右：原监控布局不动 ── -->
+          <el-row :gutter="16" class="main-row" style="flex: 1; min-width: 0">
           <el-col :span="16">
             <el-card shadow="never" class="video-card">
               <template #header>
@@ -162,8 +152,8 @@
                 />
                 <div v-if="!showPreview && !mjpegSrc" class="stream-idle">
                   {{ isVideoSource
-                    ? '未开始监控；开始监控后显示带检测框的分析画面（该视频文件不在媒体目录时无法原片回看，不影响分析告警）'
-                    : '未开始监控，点击「开始监控」查看实时画面' }}
+                    ? '未开始监控；点左侧任务卡片的开关启动检测，或选择视频源+事件后自动开始（该视频文件不在媒体目录时无法原片回看，不影响分析告警）'
+                    : '未开始监控，点左侧任务卡片的开关启动检测' }}
                 </div>
                 <div v-if="streamError && !showPreview && !!mjpegSrc" class="stream-tip">
                   实时流不可用（运行环境未安装或后端未启动）；开始监控后自动恢复
@@ -253,6 +243,7 @@
             </el-card>
           </el-col>
         </el-row>
+        </div><!-- /main-flex -->
       </el-tab-pane>
 
       <!-- ═══ Tab 2：任务管理（嵌入原任务编排） ═══ -->
@@ -272,7 +263,6 @@
 import { ref, computed, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { VideoPlay, VideoPause } from '@element-plus/icons-vue'
 import request from '@/api/request'
 import {
   alarmsSince,
@@ -455,7 +445,7 @@ async function handleCameraChange() {
   await seedTimeline()
 }
 
-// ── 启停监控（隐式任务编排）─────────────────────────
+// ── 启停监控（保留给深链自动开始：?camera_id&event_id 进入时调用）──
 async function startMonitor() {
   if (!cameraId.value || eventIds.value.length === 0) return
   acting.value = true
@@ -481,6 +471,7 @@ async function startMonitor() {
     monitoring.value = true
     previewVideo.value = false // 监控画面（带检测框叠加）优先
     ElMessage.success(started > 0 ? `监控已启动（${started} 路事件分析）` : '监控已在运行')
+    await fetchTaskCards()
   } catch (e: any) {
     ElMessage.error(e?.message || '启动失败，请检查事件状态与运行环境')
   } finally {
@@ -488,24 +479,123 @@ async function startMonitor() {
   }
 }
 
-async function stopMonitor() {
-  if (!cameraId.value) return
-  acting.value = true
+// ── 告警时间线（轮询增量）───────────────────────────
+// ═══ 左侧监控轨：任务卡片（开关=启停检测，点卡片=切主画面）═══
+const taskCards = ref<any[]>([])
+const railLoading = ref(false)
+const railActing = ref(false)
+
+async function fetchTaskCards(silent = false) {
+  // 有开关正在等启停结果时跳过静默刷新——整组替换会提前抹掉 loading 态（自查 P2-3）
+  if (silent && taskCards.value.some((t) => t._toggling)) return
+  if (!silent) railLoading.value = true
   try {
-    const res: any = await listTasks({ camera_id: cameraId.value, status: 'running', page: 1, page_size: 100 })
-    for (const t of res.items || []) {
-      await stopTask(t.id)
+    const norm = (items: any[]) => items.map((t: any) => ({ ...t, _toggling: false }))
+    // 运行中单独拉（后端按 id 倒序，任务超 100 时"混合分页"会把 id 小的老任务
+    // 截断丢失——恰好是最稳定长跑的那批，自查 P2-2）
+    const runRes: any = await listTasks({ page: 1, page_size: 100, status: 'running' })
+    const running = norm(runRes.items || [])
+    // 全量分页收集（≤5 页=500 条封顶），剔除运行中的避免重复
+    const first: any = await listTasks({ page: 1, page_size: 100 })
+    let all: any[] = [...(first.items || [])]
+    const pages = Math.min(5, Math.ceil((first.total || 0) / 100))
+    for (let p = 2; p <= pages; p++) {
+      const r: any = await listTasks({ page: p, page_size: 100 })
+      all = all.concat(r.items || [])
     }
-    monitoring.value = false
-    ElMessage.success('监控已停止')
-  } catch (e: any) {
-    ElMessage.error(e?.message || '停止失败')
+    const stopped = norm(all.filter((t: any) => t.status !== 'running'))
+    running.sort((a: any, b: any) => b.id - a.id)
+    stopped.sort((a: any, b: any) => b.id - a.id)
+    taskCards.value = [...running, ...stopped]
+  } catch {
+    // handled
   } finally {
-    acting.value = false
+    if (!silent) railLoading.value = false
   }
 }
 
-// ── 告警时间线（轮询增量）───────────────────────────
+function isCardActive(t: any) {
+  return t.camera_id === cameraId.value
+}
+
+/** 点卡片主体 = 切换主画面到该路（不自动开检测——开关才控制启停） */
+async function selectCard(t: any) {
+  if (isCardActive(t) && eventIds.value.includes(t.event_id)) return
+  cameraId.value = t.camera_id
+  await handleCameraChange()
+  // 该摄像头若无运行中任务，事件预选为被点卡片的事件（画面保持预览态）
+  if (!monitoring.value) eventIds.value = [t.event_id]
+}
+
+/** 卡片开关 = 启停该任务检测 */
+async function toggleCard(t: any, wantRunning: boolean) {
+  t._toggling = true
+  try {
+    if (wantRunning) {
+      await startTask(t.id)
+      ElMessage.success(`「${t.camera_name}·${t.event_name}」检测已启动`)
+    } else {
+      await stopTask(t.id)
+      ElMessage.info(`「${t.camera_name}·${t.event_name}」检测已停止`)
+    }
+    await fetchTaskCards()
+    // 若操作的是当前画面这路：同步 monitoring 状态（决定是否出 MJPEG 流）
+    if (t.camera_id === cameraId.value) {
+      const mine = taskCards.value.filter((x) => x.camera_id === cameraId.value && x.status === 'running')
+      monitoring.value = mine.length > 0
+      if (monitoring.value) {
+        eventIds.value = mine.map((x) => x.event_id)
+        previewVideo.value = false
+      }
+    }
+    pollStatus()
+  } catch (e: any) {
+    ElMessage.error(e?.message || '操作失败')
+    await fetchTaskCards()
+  } finally {
+    t._toggling = false
+  }
+}
+
+/** 全部启动 / 全部停止（串行，避免 worker 并发拉起抢 CPU） */
+async function railBatch(op: 'start' | 'stop') {
+  const targets = taskCards.value.filter((t) => (op === 'start' ? t.status !== 'running' : t.status === 'running'))
+  if (!targets.length) {
+    ElMessage.info(op === 'start' ? '没有可启动的任务' : '没有运行中的任务')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确定${op === 'start' ? '启动' : '停止'}全部 ${targets.length} 个任务的检测吗？`,
+      op === 'start' ? '全部启动' : '全部停止',
+      { type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  railActing.value = true
+  let ok = 0
+  let fail = 0
+  for (const t of targets) {
+    try {
+      if (op === 'start') await startTask(t.id)
+      else await stopTask(t.id)
+      ok++
+    } catch {
+      fail++
+    }
+  }
+  railActing.value = false
+  await fetchTaskCards()
+  // 当前画面这路的运行状态跟随刷新
+  const mineRunning = taskCards.value.some((x) => x.camera_id === cameraId.value && x.status === 'running')
+  if (cameraId.value) monitoring.value = mineRunning
+  pollStatus()
+  const label = op === 'start' ? '启动' : '停止'
+  if (fail === 0) ElMessage.success(`已批量${label} ${ok} 个任务`)
+  else ElMessage.warning(`批量${label}：成功 ${ok}，失败 ${fail}`)
+}
+
 async function seedTimeline() {
   // 以现有告警列表（倒序）初始化时间线与 since_id 水位
   try {
@@ -567,6 +657,8 @@ async function pollAlarms() {
 async function pollStatus() {
   try {
     status.value = await monitorStatus()
+    // 监控轨随状态轮询同步（fps/告警角标/运行态），免单独定时器
+    fetchTaskCards(true)
   } catch {
     // ignore
   }
@@ -634,6 +726,7 @@ onMounted(async () => {
   tickClock()
   clockTimer = window.setInterval(tickClock, 1000)
   await fetchBase()
+  fetchTaskCards()
   await pollStatus()
 
   // 支持其它页面带参跳入：?tab=live|tasks|records & camera_id & event_id
@@ -650,6 +743,11 @@ onMounted(async () => {
   } else if (q.event_id && activeTab.value === 'live') {
     // 只带 event_id（未选源）：预选事件，等用户选视频源后一键开始
     eventIds.value = [Number(q.event_id)]
+  } else if (!q.camera_id && activeTab.value === 'live') {
+    // 无参进入：自动定位到第一个运行中的任务（不再黑屏等选择）
+    await fetchTaskCards()
+    const first = taskCards.value.find((t) => t.status === 'running')
+    if (first) await selectCard(first)
   }
 
   alarmTimer = window.setInterval(pollAlarms, 3000)
@@ -681,7 +779,7 @@ onBeforeUnmount(() => {
 .stat-value.warning { color: #e6a23c; }
 .stat-value .unit { font-size: 13px; font-weight: 400; color: #909399; }
 
-/* 控制栏 */
+/* 控制栏（旧深链样式保留兼容） */
 .control-bar { margin-bottom: 16px; }
 .control-row { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
 .control-item { display: flex; align-items: center; gap: 8px; }
@@ -692,6 +790,51 @@ onBeforeUnmount(() => {
   background: #fff; margin-right: 5px; animation: blink 1.2s infinite;
 }
 @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+/* ── 左侧监控轨 ── */
+.main-flex { display: flex; gap: 16px; align-items: stretch; margin-bottom: 16px; }
+.task-rail {
+  width: 216px; flex-shrink: 0; display: flex; flex-direction: column;
+  background: var(--el-bg-color, #fff);
+  border: 1px solid var(--el-border-color-lighter, #ebeef5); border-radius: 8px;
+  overflow: hidden;
+}
+.rail-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 10px; border-bottom: 1px solid var(--el-border-color-lighter, #ebeef5);
+  background: var(--el-fill-color-light, #f5f7fa);
+}
+.rail-title { font-size: 13px; font-weight: 600; color: #303133; }
+.rail-actions { display: flex; align-items: center; gap: 2px; }
+.rail-list { flex: 1; overflow-y: auto; max-height: 640px; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+.task-card {
+  border: 1px solid var(--el-border-color-lighter, #ebeef5); border-radius: 8px;
+  padding: 8px 10px; cursor: pointer; background: var(--el-bg-color, #fff);
+  transition: border-color 0.15s, background 0.15s;
+}
+.task-card:hover { border-color: var(--el-color-primary-light-5, #a0cfff); }
+.task-card.active { border: 1.5px solid var(--el-color-primary, #409eff); background: var(--el-color-primary-light-9, #ecf5ff); }
+.task-card.stopped { background: var(--el-fill-color-lighter, #fafafa); }
+.tc-row1 { display: flex; align-items: center; gap: 6px; }
+.tc-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.dot-run { background: #67c23a; animation: blink 1.6s infinite; }
+.dot-warn { background: #e6a23c; }
+.dot-idle { background: #c0c4cc; }
+.tc-name {
+  flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: #303133;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.task-card.stopped .tc-name { color: #909399; font-weight: 400; }
+.tc-row2 { margin-top: 5px; }
+.tc-event {
+  display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11px; color: #606266; background: var(--el-fill-color, #f0f2f5);
+  border-radius: 3px; padding: 0 6px; line-height: 18px;
+}
+.task-card.active .tc-event { background: var(--el-color-primary-light-8, #d9ecff); color: #409eff; }
+.tc-row3 { margin-top: 6px; font-size: 11px; color: #909399; display: flex; align-items: center; gap: 4px; }
+.tc-sep { color: #dcdfe6; }
+.tc-alarm-hot { color: #f56c6c; }
 
 /* 视频窗口 */
 .main-row { margin-bottom: 16px; }

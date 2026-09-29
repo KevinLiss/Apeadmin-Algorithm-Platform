@@ -151,6 +151,30 @@ async def list_tasks(
             d["last_stats"] = live_by_task[item.id]
         result.append(d)
 
+    # 今日各任务告警数（监控台左栏卡片角标用；一次 group by，不逐任务查）
+    try:
+        from datetime import datetime, time as dtime, timedelta, timezone
+
+        from src.plugins.builtin.ai_vision.models import AIVisionAlarm
+
+        # "今日"按北京时间日切——与 /monitor/status 的 today_alarms 口径一致
+        # （created_at 为 naive UTC；北京今日零点对应的 naive UTC = 北京日期
+        #  00:00 减 8 小时）。UTC 零点日切会导致北京 0~8 点两处统计对不上。
+        now_utc = datetime.now(timezone.utc)
+        bj_today = (now_utc + timedelta(hours=8)).date()
+        day_start = datetime.combine(bj_today, dtime.min, tzinfo=timezone.utc) - timedelta(hours=8)
+        rows = (await db.execute(
+            select(AIVisionAlarm.task_id, func.count())
+            .where(AIVisionAlarm.created_at >= day_start)
+            .group_by(AIVisionAlarm.task_id)
+        )).all()
+        alarm_counts = dict(rows)
+        for d in result:
+            d["today_alarms"] = alarm_counts.get(d["id"], 0)
+    except Exception:  # noqa: BLE001 — 角标失败不影响列表主体
+        for d in result:
+            d["today_alarms"] = 0
+
     return success_response(data={
         "total": total,
         "page": page,
