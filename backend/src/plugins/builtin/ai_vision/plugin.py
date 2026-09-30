@@ -26,6 +26,7 @@ from src.plugins.builtin.ai_vision.models import (  # noqa: F401
     AIVisionModel,
     AIVisionRuntimeStatus,
     AIVisionSample,
+    AIVisionStaff,
     AIVisionTask,
     AIVisionTraining,
 )
@@ -43,6 +44,7 @@ _AIVISION_TABLES = [
     AIVisionSample.__table__,
     AIVisionTraining.__table__,
     AIVisionRuntimeStatus.__table__,
+    AIVisionStaff.__table__,
 ]
 
 

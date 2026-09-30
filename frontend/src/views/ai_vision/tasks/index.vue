@@ -251,6 +251,10 @@ function openCreate() {
   form.camera_id = null
   form.event_id = null
   form.analyze_fps = 2
+  // 每次打开弹窗无条件重拉（两个接口各 ~50ms，代价可忽略）：
+  // 彻底排除"页面加载时后端不可用/旧模块缓存导致下拉永久为空"
+  fetchCameras()
+  fetchEvents()
   // 支持从摄像头/事件页带参跳入并预选
   const q = route.query as Record<string, string>
   if (q.camera_id) form.camera_id = Number(q.camera_id)

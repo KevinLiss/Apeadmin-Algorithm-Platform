@@ -108,6 +108,16 @@ class EventRule(BaseModel):
     cy_rise_frac: float = Field(default=0.06, ge=0.01, le=0.3, description="重心上升确认阈值(画面高占比)")
     dwell_seconds: float = Field(default=2.0, ge=0.5, le=8.0, description="俯视高速后骤停驻留确认秒数(扒边)")
     alarm_line: list[list[float]] = Field(default_factory=list, description="越线确认警戒线段 [[x1,y1],[x2,y2]] 归一化（方案四预留，空=不启用）")
+    # ── 离岗检测（absence 判定器，绑定含在岗判定类的检测模型）──
+    # ⚠️ 本 schema 是事件保存的白名单：worker 用到的所有 rule 字段必须在此
+    # 声明，否则 PUT 时被 Pydantic 静默丢弃（2026-09-30 离岗字段丢失教训）
+    absence_seconds: float = Field(default=60, ge=1, le=3600, description="岗位区域持续无人多少秒告警")
+    absence_repeat: float = Field(default=0, ge=0, le=3600, description="持续离岗重复提醒间隔秒；0=每次离岗只报一次")
+    presence_class: str = Field(default="person", max_length=50, description="在岗判定类（平台类别 code，如 lifeguard）")
+    # ── 人岗验证（identity 判定器，体貌特征比对）──
+    identity_seconds: float = Field(default=30, ge=1, le=600, description="非登记人员持续在岗多少秒告警")
+    identity_threshold: float = Field(default=0.55, ge=0.1, le=0.95, description="体貌相似度阈值，低于视为非登记人员")
+    identity_interval: float = Field(default=5, ge=1, le=30, description="特征提取间隔秒（省 CPU）")
 
     @model_validator(mode="after")
     def _sync_duration_vote(self) -> "EventRule":

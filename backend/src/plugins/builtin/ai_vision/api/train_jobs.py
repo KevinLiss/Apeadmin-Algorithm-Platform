@@ -191,12 +191,19 @@ async def create_train_job(
     base_names = _base_names(base)
     if not base_names:
         raise HTTPException(status_code=400, detail="基座模型缺少类别表（category_map），无法对齐标注索引")
-    # 严格校验"顺序"：YOLO 索引按 names 顺序定死，集合相同顺序不同会导致
-    # 标注索引与基座头权重错位——训练照样收敛但模型是乱的（自查 P1-2）
-    if body.category_codes != base_names:
+    codes = body.category_codes
+    if not codes:
+        raise HTTPException(status_code=400, detail="请至少选择一个训练类别")
+    if len(set(codes)) != len(codes):
+        raise HTTPException(status_code=400, detail="训练类别不能重复")
+    # 顺序校验只针对"类别集合与基座完全相同"的场景（P1-2 原始防护）：
+    # 此时 ultralytics 复用检测头权重，顺序错位会导致索引语义错乱、模型静默训废。
+    # 增/删类别（含基座表外新类别，如"救生员"迁移学习训新类）会重建检测头，
+    # 顺序不存在对齐问题，放行——产物类别表按所选顺序生成（trainer._register_output）。
+    if set(codes) == set(base_names) and codes != base_names:
         raise HTTPException(
             status_code=400,
-            detail=f"类别顺序 {body.category_codes} 与基座类别表 {base_names} 不一致（续训须同族同类别且顺序一致）",
+            detail=f"类别顺序 {codes} 与基座类别表 {base_names} 不一致（同集合续训须顺序一致）",
         )
 
     # 已标注样本快照（按标注框内容筛选，非 category_code——P1-1）；

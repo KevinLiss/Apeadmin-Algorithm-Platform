@@ -171,6 +171,78 @@ async def monitor_status(
 # 视频源解析：把 rtsp_url（video 源的本地绝对路径）映射为可播放的 media URL
 # ---------------------------------------------------------------------------
 
+@router.get("/cameras-brief")
+async def cameras_brief(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+    _perm: Annotated[User, Depends(_require_perm("ai_vision:event:list"))],
+):
+    """摄像头简表（ROI 画框器选画面用）：只给 id/名称/类型，权限走事件。"""
+    rows = (await db.execute(
+        select(AIVisionCamera.id, AIVisionCamera.name, AIVisionCamera.source_type)
+        .where(AIVisionCamera.is_deleted == 0)
+        .order_by(AIVisionCamera.id)
+    )).all()
+    return success_response(data={"items": [
+        {"id": r[0], "name": r[1], "source_type": r[2]} for r in rows
+    ]})
+
+
+@router.get("/snapshot/{camera_id}")
+async def snapshot_frame(
+    camera_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+    _perm: Annotated[User, Depends(_require_perm("ai_vision:event:list"))],
+):
+    """抓取视频源当前一帧（ROI 画框器背景图）。
+
+    优先取运行中 worker 的最近帧（零额外开销）；worker 不在则打开源
+    抓一帧即关（RTSP 开流约 1~3s；video 文件取首帧）。
+    返回 data URL（base64 JPEG），前端 <img> 直接可用。
+    """
+    cam = await db.get(AIVisionCamera, camera_id)
+    if not cam or cam.is_deleted:
+        raise HTTPException(status_code=404, detail="摄像头不存在")
+
+    import asyncio
+    import base64
+
+    # 1) 运行中 worker：直接取最近帧
+    jpeg: bytes | None = None
+    try:
+        from src.plugins.builtin.ai_vision.runtime.manager import get_manager
+
+        worker = get_manager().get_worker(camera_id)
+        if worker is not None:
+            frame, _ts, _vts = await asyncio.to_thread(worker.latest_frame)
+            if frame is not None:
+                import cv2
+
+                ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                if ok:
+                    jpeg = buf.tobytes()
+    except Exception:  # noqa: BLE001 — worker 路径失败回退开流抓帧
+        jpeg = None
+
+    # 2) 无 worker：开一次源抓一帧
+    if jpeg is None:
+        if not cam.rtsp_url:
+            raise HTTPException(status_code=400, detail="该视频源无可用地址，且未在监控中")
+        from src.plugins.builtin.ai_vision.runtime.grabber import test_rtsp
+
+        try:
+            result = await test_rtsp(cam.rtsp_url, timeout=8.0)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"抓帧失败: {exc}") from exc
+        if not result.get("ok") or not result.get("snapshot_base64"):
+            raise HTTPException(status_code=502, detail=result.get("error") or "抓帧失败：源不可达")
+        jpeg = base64.b64decode(result["snapshot_base64"])
+
+    b64 = base64.b64encode(jpeg).decode()
+    return success_response(data={"image": f"data:image/jpeg;base64,{b64}", "camera_id": camera_id})
+
+
 @router.get("/sources/{camera_id}")
 async def resolve_source(
     camera_id: int,

@@ -72,21 +72,29 @@ class PostProcessor:
     min_size: float = 20.0  # 最小检测框边长（像素）
     threshold: float = 0.45
 
-    def filter(self, dets: list[Any]) -> list[Any]:
-        """按 ROI / 最小尺寸过滤。置信度过滤已在引擎内完成。"""
+    def filter(self, dets: list[Any], frame_w: int = 0, frame_h: int = 0) -> list[Any]:
+        """按 ROI / 最小尺寸过滤。置信度过滤已在引擎内完成。
+
+        ⚠️ ROI 多边形是归一化 0~1 坐标（画框器/事件表单产出），而检测框
+        bbox 是像素坐标——必须把框中心除以帧宽高归一化后再做包含测试。
+        一期 bug：直接拿像素中心测归一化多边形，配了 ROI 的事件所有
+        检测全被误滤（2026-09-30 离岗检测排查时发现）。
+        frame_w/frame_h 缺失（=0）时跳过 ROI 过滤（无法换算，宁放不误杀）。
+        """
         out = []
         for d in dets:
             x1, y1, x2, y2 = d.bbox
             w, h = x2 - x1, y2 - y1
             if w < self.min_size or h < self.min_size:
                 continue
-            if self.roi and not self._in_roi((x1 + x2) / 2, (y1 + y2) / 2):
-                continue
+            if self.roi and frame_w > 0 and frame_h > 0:
+                if not self._in_roi((x1 + x2) / 2 / frame_w, (y1 + y2) / 2 / frame_h):
+                    continue
             out.append(d)
         return out
 
     def _in_roi(self, cx: float, cy: float) -> bool:
-        """点在 ROI 多边形内（含边界）。"""
+        """归一化点是否在 ROI 多边形（同为归一化坐标）内（含边界）。"""
         import cv2
 
         poly = np.array([(float(p[0]), float(p[1])) for p in self.roi], dtype=np.float32)
@@ -933,6 +941,181 @@ class ClimbingDetector:
         return max(detections, key=lambda d: d.conf)
 
 
+class AbsenceDetector:
+    """离岗检测：岗位 ROI 内持续无人超阈值 → 告警（布防时段内）。
+
+    规则参数：
+    - absence_seconds: 持续无人多少秒告警（默认 60）
+    - cooldown: 告警冷却（默认 300，一段离岗只报一次，人回来复位后可再报）
+    - schedule: 布防时段 [{"start":"09:00","end":"18:00"},...]（本地时间，
+      空=全天布防；时段外不累计无人时长并复位状态）
+    """
+
+    def __init__(self, rule: dict[str, Any], fps: int) -> None:
+        self.absence_seconds = float(rule.get("absence_seconds", 60))
+        self.cooldown = int(rule.get("cooldown", 300))
+        # 重复提醒间隔（秒）：0 = 每次离岗只报一次（人回来复位后才能再报）；
+        # >0 = 持续离岗期间每隔该秒数重复告警一次
+        self.repeat = float(rule.get("absence_repeat", 0) or 0)
+        self.schedule = rule.get("schedule") or []
+        self._empty_since: float | None = None
+        self._last_alarm_at = 0.0
+        self._episode_fired = False
+        self.episode_max_conf = 0.0
+
+    @staticmethod
+    def _in_schedule(ts: float, schedule: list) -> bool:
+        """本地时间是否落在任一布防时段内；schedule 空=全天。"""
+        if not schedule:
+            return True
+        import datetime as _dt
+
+        now = _dt.datetime.fromtimestamp(ts).time()
+        cur = now.hour * 60 + now.minute
+        for seg in schedule:
+            try:
+                sh, sm = (int(x) for x in str(seg.get("start", "00:00")).split(":"))
+                eh, em = (int(x) for x in str(seg.get("end", "23:59")).split(":"))
+            except (ValueError, AttributeError):
+                continue
+            s, e = sh * 60 + sm, eh * 60 + em
+            if s <= e:
+                if s <= cur <= e:
+                    return True
+            elif cur >= s or cur <= e:  # 跨零点时段（如 22:00-06:00）
+                return True
+        return False
+
+    def feed(self, detections: list[Any], ts: float) -> bool:
+        """喂入 ROI 过滤后的检测结果（有人=非空），返回是否告警。"""
+        if not self._in_schedule(ts, self.schedule):
+            self._empty_since = None
+            self._episode_fired = False
+            return False
+        if detections:
+            self._empty_since = None
+            self._episode_fired = False  # 人回来=本次离岗结束，允许下次再报
+            # 记录"最后一次看到在岗人员"的置信度：离岗告警触发瞬间 ROI 内
+            # 已无目标框，落库置信度回退到此值（同跳水 episode_max_conf 思路），
+            # 否则告警恒显示 0%（2026-09-30 用户报"阈值0.3为何0%也告警"）
+            self.episode_max_conf = max(d.conf for d in detections)
+            return False
+        if self._empty_since is None:
+            self._empty_since = ts
+            return False
+        if ts - self._empty_since < self.absence_seconds:
+            return False
+        # 告警间隙（2026-09-30 用户需求"双模型重复告警"）：
+        # absence_repeat=0（默认）→ 每次离岗只报一次，人回来复位后才能再报；
+        # >0 → 持续离岗期间每隔该秒数重复提醒一次
+        if self.repeat <= 0 and self._episode_fired:
+            return False
+        gap = self.repeat if (self.repeat > 0 and self._episode_fired) else self.cooldown
+        if ts - self._last_alarm_at < gap:
+            return False
+        self._last_alarm_at = ts
+        self._episode_fired = True
+        return True
+
+
+class IdentityDetector:
+    """人岗验证：在岗人员外观特征与登记员工档案比对，不符持续 N 秒告警。
+
+    规则参数：
+    - identity_seconds: 非登记人员持续在岗多少秒告警（默认 30）
+    - identity_threshold: 余弦相似度阈值（默认 0.55，低于视为非登记人员）
+    - identity_interval: 特征提取间隔秒（默认 5，省 CPU）
+    - cooldown: 告警冷却（默认 300）
+
+    档案由 staff API 维护（按 event_id 绑定）；无档案时不告警（视为未启用）。
+    """
+
+    def __init__(self, rule: dict[str, Any], fps: int) -> None:
+        self.identity_seconds = float(rule.get("identity_seconds", 30))
+        self.sim_threshold = float(rule.get("identity_threshold", 0.55))
+        self.interval = max(1.0, float(rule.get("identity_interval", 5)))
+        self.cooldown = int(rule.get("cooldown", 300))
+        self._mismatch_since: float | None = None
+        self._last_check = 0.0
+        self._last_alarm_at = 0.0
+        self._last_det_count = 0
+        self._staff_cache: list[np.ndarray] = []
+        self._staff_cache_at = 0.0
+        self.last_sim: float | None = None
+        self.episode_max_conf = 0.0
+
+    def _load_staff(self, event_id: int, ts: float) -> list[np.ndarray]:
+        """员工档案特征缓存（30s 刷新，避免每帧查库）。"""
+        if ts - self._staff_cache_at < 30:
+            return self._staff_cache
+        vecs: list[np.ndarray] = []
+        try:
+            import json
+
+            from src.plugins.builtin.ai_vision.models import AIVisionStaff
+            from src.plugins.builtin.ai_vision.runtime.syncdb import sync_session
+
+            with sync_session() as db:
+                rows = db.query(AIVisionStaff).filter(AIVisionStaff.event_id == event_id).all()
+                for r in rows:
+                    try:
+                        v = np.array(json.loads(r.embedding or "[]"), dtype=np.float32)
+                        if v.size:
+                            vecs.append(v)
+                    except (ValueError, TypeError):
+                        continue
+        except Exception:  # noqa: BLE001
+            pass
+        self._staff_cache = vecs
+        self._staff_cache_at = ts
+        return vecs
+
+    def feed(self, detections: list[Any], ts: float, frame: Any = None, event_id: int = 0) -> bool:
+        """喂入 ROI 内 person 检测（像素坐标）+ 当前帧，返回是否告警。"""
+        staff = self._load_staff(event_id, ts)
+        cur_count = len(detections)
+        # 提取间隔内 ROI 内人数变化（有人回岗/换人）→ 累计已不可信，重置
+        # 等下个提取帧重新判定，避免"非登记人员持续在岗"被误累计成告警
+        if cur_count != self._last_det_count:
+            self._mismatch_since = None
+        self._last_det_count = cur_count
+        if not staff or not detections:
+            self._mismatch_since = None
+            return False
+        if ts - self._last_check < self.interval or frame is None:
+            # 非提取帧：沿用上次结论的持续累计（不重置）
+            if self._mismatch_since is not None and ts - self._mismatch_since >= self.identity_seconds:
+                if ts - self._last_alarm_at >= self.cooldown:
+                    self._last_alarm_at = ts
+                    return True
+            return False
+        self._last_check = ts
+
+        from src.plugins.builtin.ai_vision.runtime.appearance import get_appearance_engine
+
+        eng = get_appearance_engine()
+        if eng is None:
+            return False
+        target = max(detections, key=lambda d: d.bbox[2] - d.bbox[0])
+        emb = eng.embed_crop(frame, target.bbox)
+        if emb is None:
+            return False
+        best_sim = max(float(np.dot(emb, v)) for v in staff)
+        self.last_sim = round(best_sim, 3)
+        if best_sim >= self.sim_threshold:
+            self._mismatch_since = None
+            return False
+        if self._mismatch_since is None:
+            self._mismatch_since = ts
+            return False
+        if ts - self._mismatch_since < self.identity_seconds:
+            return False
+        if ts - self._last_alarm_at < self.cooldown:
+            return False
+        self._last_alarm_at = ts
+        return True
+
+
 @dataclass(slots=True)
 class WorkerStats:
     """worker 运行指标（供 /tasks/{id}/stats）。"""
@@ -1237,6 +1420,10 @@ class StreamWorker:
                 task.detector = OverheadDivingDetector(rule, task.analyze_fps)
             elif mode == "climbing":
                 task.detector = ClimbingDetector(rule, task.analyze_fps)
+            elif mode == "absence":
+                task.detector = AbsenceDetector(rule, task.analyze_fps)
+            elif mode == "identity":
+                task.detector = IdentityDetector(rule, task.analyze_fps)
             else:
                 task.detector = EventDetector(rule, task.analyze_fps)
 
@@ -1267,7 +1454,7 @@ class StreamWorker:
                     logger.warning(f"[AIVision] pose detect failed (task {task.task_id}): {exc}")
 
             # ROI / 最小尺寸过滤（PoseDetection 有 bbox 属性，复用 PostProcessor）
-            pose_dets = pp.filter(pose_dets)
+            pose_dets = pp.filter(pose_dets, fw, fh)
 
             boxes = [
                 self._pose_box_dict(d, fw, fh)
@@ -1321,6 +1508,56 @@ class StreamWorker:
                 self._raise_alarm(task, [], action_label="diving_top")
             return boxes
 
+        # ── 离岗 / 人岗验证路径（absence / identity）：在岗判定类框 ──────
+        if isinstance(task.detector, (AbsenceDetector, IdentityDetector)):
+            # 在岗判定类：默认 person；救生员离岗等场景配成训练类别（如 lifeguard）。
+            # 取类别表含该类的模型句柄（coco 检测或 pose 均可）
+            presence_class = str(rule.get("presence_class") or "person")
+            person_handles = []
+            for mid in task.model_ids:
+                h = handles.get(mid)
+                if h is not None and presence_class in set(getattr(h, "category_map", {}).values()):
+                    person_handles.append(h)
+            if not person_handles and not getattr(self, "_abs_warned", False):
+                logger.warning(
+                    f"[AIVision] task {task.task_id}: absence/identity 需绑定类别表含「{presence_class}」的模型，当前绑定无效"
+                )
+                self._abs_warned = True
+            person_dets: list[Any] = []
+            for handle in person_handles:
+                cat_filter = {
+                    cid for cid, cat in handle.category_map.items() if cat == presence_class
+                }
+                try:
+                    if getattr(handle, "is_pose", False):
+                        person_dets.extend(
+                            self.engine.detect_pose(frame, handle, threshold=threshold, classes_filter=cat_filter)
+                        )
+                    else:
+                        person_dets.extend(
+                            self.engine.detect(frame, handle, threshold=threshold, classes_filter=cat_filter)
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[AIVision] absence/identity detect failed (task {task.task_id}): {exc}")
+            person_dets = pp.filter(person_dets, fw, fh)
+            boxes = [
+                {
+                    "x1": max(0.0, min(1.0, d.bbox[0] / fw)),
+                    "y1": max(0.0, min(1.0, d.bbox[1] / fh)),
+                    "x2": max(0.0, min(1.0, d.bbox[2] / fw)),
+                    "y2": max(0.0, min(1.0, d.bbox[3] / fh)),
+                    "label": f"{d.cls_name} {d.conf:.2f}",
+                }
+                for d in sorted(person_dets, key=lambda x: x.conf, reverse=True)[:5]
+            ]
+            if isinstance(task.detector, AbsenceDetector):
+                if task.detector.feed(person_dets, time.time()):
+                    self._raise_alarm(task, [], action_label="absence")
+            else:
+                if task.detector.feed(person_dets, time.time(), frame=frame, event_id=task.event_id):
+                    self._raise_alarm(task, person_dets, action_label="wrong_person")
+            return boxes
+
         # ── 目标检测路径（原有逻辑）─────────────────────────
         # 收集该事件关心的所有检测
         all_dets: list[Any] = []
@@ -1337,7 +1574,7 @@ class StreamWorker:
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"[AIVision] detect failed (task {task.task_id}): {exc}")
 
-        all_dets = pp.filter(all_dets)
+        all_dets = pp.filter(all_dets, fw, fh)
 
         # 归一化检测框（画面叠加层用）
         boxes = [

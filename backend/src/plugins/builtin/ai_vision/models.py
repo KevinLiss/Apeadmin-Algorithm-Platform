@@ -308,3 +308,33 @@ class AIVisionRuntimeStatus(IDMixin, TimestampMixin, Base):
         String(20), default="idle", comment="idle/installing/failed"
     )
     install_log: Mapped[str] = mapped_column(Text, default="", comment="安装日志")
+
+
+# ---------------------------------------------------------------------------
+# 员工体貌档案（人岗验证：衣着体貌特征比对）
+# ---------------------------------------------------------------------------
+
+
+class AIVisionStaff(IDMixin, TimestampMixin, Base):
+    """岗位员工体貌档案：登记照片提取的外观特征向量。
+
+    人岗验证（rule.detector=identity）用：worker 对在岗人框提取
+    ReID/外观特征，与本事件绑定档案的特征做余弦相似度比对，
+    最高相似度持续低于阈值 → 错岗告警。
+    换班/换工装时重新登记覆盖 embedding 即可（updated_at 记录登记时间）。
+    """
+
+    __tablename__ = "ai_vision_staff"
+
+    name: Mapped[str] = mapped_column(String(50), comment="员工姓名/工号")
+    event_id: Mapped[int] = mapped_column(
+        Integer, index=True, comment="绑定事件 ID（该岗位）"
+    )
+    embedding: Mapped[str] = mapped_column(
+        Text, default="[]", comment="JSON: 归一化外观特征向量（多照均值）"
+    )
+    photo_path: Mapped[str] = mapped_column(
+        String(500), default="", comment="登记参考照片路径（最近一次）"
+    )
+    photo_count: Mapped[int] = mapped_column(Integer, default=0, comment="登记照片数")
+    note: Mapped[str] = mapped_column(String(200), default="", comment="班次/备注")

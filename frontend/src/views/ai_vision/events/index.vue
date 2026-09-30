@@ -24,6 +24,8 @@
           <el-tag v-if="row.rule?.detector === 'diving'" size="small" type="warning" style="margin-left: 6px">动作识别</el-tag>
           <el-tag v-else-if="row.rule?.detector === 'diving_top'" size="small" type="primary" style="margin-left: 6px">俯视跳水</el-tag>
           <el-tag v-else-if="row.rule?.detector === 'climbing'" size="small" type="danger" style="margin-left: 6px">攀爬翻越</el-tag>
+          <el-tag v-else-if="row.rule?.detector === 'absence'" size="small" type="info" style="margin-left: 6px">离岗检测</el-tag>
+          <el-tag v-else-if="row.rule?.detector === 'identity'" size="small" type="success" style="margin-left: 6px">人岗验证</el-tag>
         </template>
       </el-table-column>
       <el-table-column label="类别" min-width="120">
@@ -102,6 +104,8 @@
             <el-radio-button value="diving">动作识别（跳水）</el-radio-button>
             <el-radio-button value="diving_top">跳水-高空俯视</el-radio-button>
             <el-radio-button value="climbing">攀爬翻越</el-radio-button>
+            <el-radio-button value="absence">离岗检测</el-radio-button>
+            <el-radio-button value="identity">人岗验证</el-radio-button>
           </el-radio-group>
           <el-text v-if="form.rule.detector === 'diving'" size="small" type="warning" style="margin-top: 4px">
             需绑定姿态模型（yolo11n-pose），类别选择"人员"
@@ -112,9 +116,15 @@
           <el-text v-else-if="form.rule.detector === 'climbing'" size="small" type="warning" style="margin-top: 4px">
             翻越围栏/桥边/湖岸：需绑定姿态模型（yolo11n-pose），类别选"人员"；可选配警戒线做越线确认
           </el-text>
+          <el-text v-else-if="form.rule.detector === 'absence'" size="small" type="warning" style="margin-top: 4px">
+            岗位区域（ROI）内持续无人超阈值即告警：需绑定含"人员"类的检测模型（yolo11n-coco），并务必标定岗位 ROI
+          </el-text>
+          <el-text v-else-if="form.rule.detector === 'identity'" size="small" type="warning" style="margin-top: 4px">
+            在岗人员与登记员工体貌比对，不符持续超阈值告警：需绑定含"人员"类的检测模型 + 标定岗位 ROI + 登记员工档案
+          </el-text>
         </el-form-item>
         <el-form-item label="目标类别" required>
-          <el-select v-model="form.category_codes" multiple placeholder="选择要识别的目标类别" style="width: 100%" :disabled="form.rule.detector === 'diving' || form.rule.detector === 'diving_top' || form.rule.detector === 'climbing'">
+          <el-select v-model="form.category_codes" multiple placeholder="选择要识别的目标类别" style="width: 100%" :disabled="['diving', 'diving_top', 'climbing', 'absence', 'identity'].includes(form.rule.detector)">
             <el-option v-for="c in categories" :key="c.code" :label="`${c.name} (${c.code})`" :value="c.code" :disabled="c.status !== 1" />
           </el-select>
         </el-form-item>
@@ -126,6 +136,7 @@
             <template v-if="form.rule.detector === 'diving'">跳水识别必须选择 yolo11n-pose 姿态模型</template>
             <template v-else-if="form.rule.detector === 'diving_top'">高空俯视跳水必须选择 yolo11n-coco 目标检测模型</template>
             <template v-else-if="form.rule.detector === 'climbing'">攀爬翻越必须选择 yolo11n-pose 姿态模型</template>
+            <template v-else-if="form.rule.detector === 'absence' || form.rule.detector === 'identity'">必须选择含"人员"类的检测模型（yolo11n-coco）</template>
             <template v-else>需选择与目标类别匹配的模型</template>
           </el-text>
         </el-form-item>
@@ -162,6 +173,7 @@
         </template>
         <template v-else-if="form.rule.detector === 'diving_top'">
           <el-form-item label="水池区域">
+            <el-button size="small" type="primary" plain style="margin-bottom: 6px" @click="fetchDrawerCameras(); poolRoiDrawerVisible = true">在画面上圈选</el-button>
             <el-input
               v-model="poolRoiText"
               type="textarea"
@@ -198,6 +210,7 @@
             <el-text size="small" type="info">无抬腿/上攀等辅助特征时，仅凭持续攀爬姿态告警的最低时长</el-text>
           </el-form-item>
           <el-form-item label="警戒线（预留）">
+            <el-button size="small" type="primary" plain style="margin-bottom: 6px" @click="fetchDrawerCameras(); alarmLineDrawerVisible = true">在画面上画线</el-button>
             <el-input
               v-model="alarmLineText"
               type="textarea"
@@ -209,6 +222,80 @@
               围栏/岸线的两个端点（归一化 0~1）。配置后仅当人从一侧越过到另一侧才告警（方案四越线确认）；留空=不启用
             </el-text>
             <el-text v-if="alarmLineError" size="small" type="danger">格式错误：需为 [[x1,y1],[x2,y2]] 且坐标在 0~1</el-text>
+          </el-form-item>
+        </template>
+        <template v-else-if="form.rule.detector === 'absence'">
+          <el-form-item label="岗位区域">
+            <el-button size="small" type="primary" plain style="margin-bottom: 6px" @click="fetchDrawerCameras(); roiDrawerVisible = true">在画面上圈选</el-button>
+            <el-input
+              v-model="roiText"
+              type="textarea"
+              :rows="2"
+              placeholder='[[0.3,0.4],[0.7,0.4],[0.7,0.8],[0.3,0.8]]'
+              @blur="parseRoi"
+            />
+            <el-text size="small" type="info">
+              岗位工作区域的归一化多边形（0~1，左上为原点，3~6 顶点）。只有该区域内的人才算"在岗"；
+              留空 = 整个画面。建议用「在画面上圈选」直接在监控画面画，不用手填坐标
+            </el-text>
+            <el-text v-if="roiError" size="small" type="danger">格式错误：需为 [[x,y],...] 且 x/y 在 0~1</el-text>
+          </el-form-item>
+          <el-form-item label="在岗判定类">
+            <el-select v-model="form.rule.presence_class" style="width: 200px">
+              <el-option label="人员（通用，任何人算在岗）" value="person" />
+              <el-option v-for="c in categories.filter((x) => x.code !== 'person' && x.status === 1)" :key="c.code" :label="`${c.name}（穿该制服/工装才算在岗）`" :value="c.code" />
+            </el-select>
+            <el-text size="small" type="info" style="display: block; margin-top: 4px">
+              判定"在岗"依据的检测类别：选"人员"=画面里有人就不算离岗；选"救生员"等训练类别=必须有该着装的人在场（需绑定含该类别的模型，如自训 lifeguard 产物）
+            </el-text>
+          </el-form-item>
+          <el-form-item label="离岗时长(s)">
+            <el-input-number v-model="form.rule.absence_seconds" :min="1" :max="3600" :step="1" />
+            <el-text size="small" type="info">岗位区域内持续无人超过该秒数即告警（人回来自动复位）</el-text>
+          </el-form-item>
+          <el-form-item label="重复提醒(s)">
+            <el-input-number v-model="form.rule.absence_repeat" :min="0" :max="3600" :step="30" />
+            <el-text size="small" type="info">0 = 每次离岗只报一条（人回岗再离开才算新告警，双模型/多模型不会重复刷屏）；&gt;0 = 持续离岗期间每隔该秒数再提醒一次</el-text>
+          </el-form-item>
+          <el-form-item label="布防时段">
+            <div v-for="(seg, i) in form.rule.schedule" :key="i" style="display: flex; gap: 8px; margin-bottom: 6px">
+              <el-time-select v-model="seg.start" start="00:00" step="00:30" end="23:30" placeholder="开始" style="width: 110px" />
+              <el-time-select v-model="seg.end" :min-time="seg.start" start="00:00" step="00:30" end="23:59" placeholder="结束" style="width: 110px" />
+              <el-button link type="danger" size="small" @click="form.rule.schedule.splice(i, 1)">删</el-button>
+            </div>
+            <el-button link type="primary" size="small" @click="form.rule.schedule.push({ start: '09:00', end: '18:00' })">+ 添加时段</el-button>
+            <el-text size="small" type="info" style="display: block">留空 = 全天布防；时段外不判定离岗（如夜班岗位只布防夜班时段）</el-text>
+          </el-form-item>
+        </template>
+        <template v-else-if="form.rule.detector === 'identity'">
+          <el-form-item label="岗位区域">
+            <el-button size="small" type="primary" plain style="margin-bottom: 6px" @click="fetchDrawerCameras(); roiDrawerVisible = true">在画面上圈选</el-button>
+            <el-input
+              v-model="roiText"
+              type="textarea"
+              :rows="2"
+              placeholder='[[0.3,0.4],[0.7,0.4],[0.7,0.8],[0.3,0.8]]'
+              @blur="parseRoi"
+            />
+            <el-text size="small" type="info">
+              岗位工作区域的归一化多边形（0~1，左上为原点，3~6 顶点）。只有该区域内的人才参与身份比对；
+              留空 = 整个画面（路过的人也会被比对，建议务必标定）
+            </el-text>
+            <el-text v-if="roiError" size="small" type="danger">格式错误：需为 [[x,y],...] 且 x/y 在 0~1</el-text>
+          </el-form-item>
+          <el-form-item label="相似度阈值">
+            <el-slider v-model="form.rule.identity_threshold" :min="0.3" :max="0.9" :step="0.05" show-input />
+            <el-text size="small" type="info">在岗人员与登记员工的体貌相似度低于该值视为"非登记人员"（同款工装多时调低）</el-text>
+          </el-form-item>
+          <el-form-item label="持续时长(s)">
+            <el-input-number v-model="form.rule.identity_seconds" :min="5" :max="600" :step="5" />
+            <el-text size="small" type="info">非登记人员持续在岗超过该秒数才告警（防路过/短暂顶替误报）</el-text>
+          </el-form-item>
+          <el-form-item label="员工档案">
+            <el-text size="small" :type="staffCount > 0 ? 'success' : 'danger'">
+              该事件已登记 {{ staffCount }} 名员工{{ staffCount === 0 ? '（未登记时人岗验证不生效，请到「员工档案」登记当班着装照片）' : '' }}
+            </el-text>
+            <el-button link type="primary" size="small" @click="staffDrawer = true; fetchStaffList()">管理员工档案</el-button>
           </el-form-item>
         </template>
         <el-form-item label="冷却(s)">
@@ -227,6 +314,59 @@
         <el-button type="primary" :loading="saving" @click="handleSave">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- ROI 可视化画框器（三处；确认后写回 rule 并同步文本框） -->
+    <RoiDrawer :visible="roiDrawerVisible" :model-value="form.rule.roi" mode="polygon" :cameras="drawerCameras" @update:visible="roiDrawerVisible = $event" @update:model-value="onRoiDrawn" />
+    <RoiDrawer :visible="poolRoiDrawerVisible" :model-value="form.rule.pool_roi" mode="polygon" :cameras="drawerCameras" @update:visible="poolRoiDrawerVisible = $event" @update:model-value="onPoolRoiDrawn" />
+    <RoiDrawer :visible="alarmLineDrawerVisible" :model-value="form.rule.alarm_line" mode="line" :cameras="drawerCameras" @update:visible="alarmLineDrawerVisible = $event" @update:model-value="onAlarmLineDrawn" />
+
+    <!-- 员工体貌档案抽屉（人岗验证用） -->
+    <el-drawer v-model="staffDrawer" title="员工体貌档案（人岗验证）" size="420px">
+      <el-alert v-if="!editingId" type="warning" :closable="false" style="margin-bottom: 12px">
+        请先保存事件后再登记员工档案
+      </el-alert>
+      <template v-else>
+        <el-card shadow="never" style="margin-bottom: 12px">
+          <el-form label-width="70px" size="small">
+            <el-form-item label="姓名">
+              <el-input v-model="staffForm.name" placeholder="员工姓名或工号" maxlength="50" />
+            </el-form-item>
+            <el-form-item label="班次备注">
+              <el-input v-model="staffForm.note" placeholder="如：早班 / 白班工装" maxlength="200" />
+            </el-form-item>
+            <el-form-item label="着装照片">
+              <el-upload
+                v-model:file-list="staffFiles"
+                :auto-upload="false"
+                accept=".jpg,.jpeg,.png,.bmp,.webp"
+                :limit="5"
+                list-type="picture"
+              >
+                <el-button size="small" type="primary">选择照片（1~5 张）</el-button>
+              </el-upload>
+              <el-text size="small" type="info" style="display: block; margin-top: 4px">
+                拍当班实际着装（站姿正面/侧面各一张效果更好）；换班或换工装后重新登记覆盖
+              </el-text>
+            </el-form-item>
+            <el-form-item>
+              <el-button type="primary" :loading="staffSaving" :disabled="!staffForm.name || !staffFiles.length" @click="registerStaff">
+                登记 / 更新
+              </el-button>
+            </el-form-item>
+          </el-form>
+        </el-card>
+        <el-table :data="staffList" size="small" v-loading="staffLoading">
+          <el-table-column prop="name" label="姓名" width="90" />
+          <el-table-column prop="photo_count" label="照片" width="50" />
+          <el-table-column prop="note" label="备注" show-overflow-tooltip />
+          <el-table-column label="操作" width="60" align="center">
+            <template #default="{ row }">
+              <el-button link type="danger" size="small" @click="deleteStaff(row)">删</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </template>
+    </el-drawer>
   </div>
 </template>
 
@@ -238,6 +378,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import request from '@/api/request'
 import { formatDateTime } from '@/utils/time'
+import RoiDrawer from '@/components/RoiDrawer.vue'
 
 const router = useRouter()
 
@@ -276,6 +417,14 @@ const form = reactive({
     hand_dur: 1.2,
     hard_dur: 2.2,
     alarm_line: [] as number[][],
+    roi: [] as number[][],
+    presence_class: 'person',
+    absence_seconds: 60,
+    absence_repeat: 0,
+    schedule: [] as { start: string; end: string }[],
+    identity_threshold: 0.55,
+    identity_seconds: 30,
+    identity_interval: 5,
   },
 })
 
@@ -306,6 +455,62 @@ function parseAlarmLine() {
 /** 俯视水池多边形：文本 ↔ form.rule.pool_roi 双向同步 */
 const poolRoiText = ref('')
 const poolRoiError = ref(false)
+
+/** 岗位区域 ROI：文本 ↔ form.rule.roi 双向同步（absence/identity 用） */
+const roiText = ref('')
+const roiError = ref(false)
+function parseRoi() {
+  const s = roiText.value.trim()
+  if (!s) {
+    form.rule.roi = []
+    roiError.value = false
+    return
+  }
+  try {
+    const v = JSON.parse(s)
+    const ok =
+      Array.isArray(v) &&
+      v.length >= 3 &&
+      v.every((p: any) => Array.isArray(p) && p.length >= 2 && p[0] >= 0 && p[0] <= 1 && p[1] >= 0 && p[1] <= 1)
+    if (!ok) throw new Error('bad')
+    form.rule.roi = v.map((p: any) => [Number(p[0]), Number(p[1])])
+    roiError.value = false
+  } catch {
+    roiError.value = true
+  }
+}
+
+// ═══ ROI 可视化画框器（三处复用：岗位区域/水池区域/警戒线）═══
+const roiDrawerVisible = ref(false)
+const poolRoiDrawerVisible = ref(false)
+const alarmLineDrawerVisible = ref(false)
+/** 摄像头列表统一拉取一次，三个画框器实例共用（避免各自重复请求） */
+const drawerCameras = ref<any[]>([])
+async function fetchDrawerCameras() {
+  if (drawerCameras.value.length) return
+  try {
+    const res: any = await request.get('/ai-vision/monitor/cameras-brief')
+    drawerCameras.value = res.items || []
+  } catch {
+    // handled
+  }
+}
+/** 画框器确认后：写回 rule + 同步文本框显示 */
+function onRoiDrawn(v: number[][]) {
+  form.rule.roi = v
+  roiText.value = v.length ? JSON.stringify(v) : ''
+  roiError.value = false
+}
+function onPoolRoiDrawn(v: number[][]) {
+  form.rule.pool_roi = v
+  poolRoiText.value = v.length ? JSON.stringify(v) : ''
+  poolRoiError.value = false
+}
+function onAlarmLineDrawn(v: number[][]) {
+  form.rule.alarm_line = v
+  alarmLineText.value = v.length ? JSON.stringify(v) : ''
+  alarmLineError.value = false
+}
 function parsePoolRoi() {
   const s = poolRoiText.value.trim()
   if (!s) {
@@ -351,6 +556,22 @@ function onDetectorChange(v: string) {
     if (form.rule.cooldown < 10) form.rule.cooldown = 10
     const pose = models.value.find((m: any) => m.name?.includes('pose'))
     if (pose) form.model_ids = [pose.id]
+  } else if (v === 'absence') {
+    // 告警语义类别=离岗；"在岗判定类"由 rule.presence_class 单独控制（检测过滤用）
+    form.category_codes = ['absence']
+    form.rule.presence_class = form.rule.presence_class || 'person'
+    form.rule.fps = 1 // 离岗是分钟级事件，1fps 足够且省 CPU
+    if (form.rule.cooldown < 60) form.rule.cooldown = 300
+    const coco = models.value.find((m: any) => m.name?.includes('coco') && !m.name?.includes('pose'))
+    if (coco) form.model_ids = [coco.id]
+  } else if (v === 'identity') {
+    form.category_codes = ['wrong_person']
+    form.rule.presence_class = 'person' // 人岗验证固定按人体框提体貌特征
+    form.rule.fps = 1
+    if (form.rule.cooldown < 60) form.rule.cooldown = 300
+    const coco = models.value.find((m: any) => m.name?.includes('coco') && !m.name?.includes('pose'))
+    if (coco) form.model_ids = [coco.id]
+    fetchStaffCount()
   } else {
     if (form.rule.fps > 2) form.rule.fps = 2
   }
@@ -385,6 +606,74 @@ async function fetchModels() {
   } catch {
     // handled by interceptor
   }
+}
+
+// ═══ 员工体貌档案（人岗验证）═══const staffDrawer = ref(false)
+const staffLoading = ref(false)
+const staffSaving = ref(false)
+const staffList = ref<any[]>([])
+const staffCount = ref(0)
+const staffFiles = ref<any[]>([])
+const staffForm = reactive({ name: '', note: '' })
+
+async function fetchStaffList() {
+  if (!editingId.value) return
+  staffLoading.value = true
+  try {
+    const res: any = await request.get('/ai-vision/staff', { params: { event_id: editingId.value } })
+    staffList.value = res.items || []
+    staffCount.value = staffList.value.length
+  } catch {
+    // handled
+  } finally {
+    staffLoading.value = false
+  }
+}
+
+async function fetchStaffCount() {
+  const eid = editingId.value
+  if (!eid) return
+  try {
+    const res: any = await request.get('/ai-vision/staff', { params: { event_id: eid } })
+    staffCount.value = (res.items || []).length
+  } catch {
+    // handled
+  }
+}
+
+async function registerStaff() {
+  if (!editingId.value || !staffFiles.value.length) return
+  staffSaving.value = true
+  try {
+    const fd = new FormData()
+    fd.append('name', staffForm.name)
+    fd.append('event_id', String(editingId.value))
+    fd.append('note', staffForm.note)
+    for (const f of staffFiles.value) {
+      if (f.raw) fd.append('files', f.raw)
+    }
+    const res: any = await request.post('/ai-vision/staff/register', fd)
+    ElMessage.success(res.msg || '登记成功')
+    staffForm.name = ''
+    staffForm.note = ''
+    staffFiles.value = []
+    await fetchStaffList()
+  } catch (e: any) {
+    ElMessage.error(e?.message || '登记失败')
+  } finally {
+    staffSaving.value = false
+  }
+}
+
+async function deleteStaff(row: any) {
+  try {
+    await ElMessageBox.confirm(`删除 ${row.name} 的体貌档案？`, '提示', { type: 'warning' })
+  } catch {
+    return
+  }
+  await request.delete(`/ai-vision/staff/${row.id}`)
+  ElMessage.success('已删除')
+  await fetchStaffList()
 }
 
 async function fetchList() {
@@ -427,11 +716,21 @@ function openCreate() {
     hand_dur: 1.2,
     hard_dur: 2.2,
     alarm_line: [],
+    roi: [],
+    presence_class: 'person',
+    absence_seconds: 60,
+    absence_repeat: 0,
+    schedule: [],
+    identity_threshold: 0.55,
+    identity_seconds: 30,
+    identity_interval: 5,
   }
   poolRoiText.value = ''
   poolRoiError.value = false
   alarmLineText.value = ''
   alarmLineError.value = false
+  roiText.value = ''
+  roiError.value = false
   dialogVisible.value = true
 }
 
@@ -460,12 +759,38 @@ function openEdit(row: any) {
     hand_dur: row.rule?.hand_dur ?? 1.2,
     hard_dur: row.rule?.hard_dur ?? 2.2,
     alarm_line: row.rule?.alarm_line ?? [],
+    roi: row.rule?.roi ?? [],
+    presence_class: row.rule?.presence_class ?? 'person',
+    absence_seconds: row.rule?.absence_seconds ?? 60,
+    absence_repeat: row.rule?.absence_repeat ?? 0,
+    schedule: Array.isArray(row.rule?.schedule) ? row.rule.schedule.map((s: any) => ({ ...s })) : [],
+    identity_threshold: row.rule?.identity_threshold ?? 0.55,
+    identity_seconds: row.rule?.identity_seconds ?? 30,
+    identity_interval: row.rule?.identity_interval ?? 5,
   }
   poolRoiText.value = row.rule?.pool_roi?.length ? JSON.stringify(row.rule.pool_roi) : ''
   poolRoiError.value = false
   alarmLineText.value = row.rule?.alarm_line?.length ? JSON.stringify(row.rule.alarm_line) : ''
   alarmLineError.value = false
+  roiText.value = row.rule?.roi?.length ? JSON.stringify(row.rule.roi) : ''
+  roiError.value = false
+  if (form.rule.detector === 'identity') fetchStaffCount()
   dialogVisible.value = true
+}
+
+/** 提交前兜底：el-input-number 被清空时值为 null，后端 schema 按类型拒绝
+ *  （422 且错误详情为数组、提示不友好）——null 一律回退默认值（自查 2026-09-30 #2） */
+function ruleForSubmit() {
+  const d: Record<string, number> = {
+    threshold: 0.45, duration: 0, cooldown: 60, fps: 2,
+    absence_seconds: 60, absence_repeat: 0,
+    identity_threshold: 0.55, identity_seconds: 30, identity_interval: 5,
+  }
+  const out: Record<string, any> = {}
+  for (const [k, v] of Object.entries(form.rule)) {
+    out[k] = v === null && k in d ? d[k] : v
+  }
+  return out
 }
 
 async function handleSave() {
@@ -505,6 +830,31 @@ async function handleSave() {
       return
     }
   }
+  // absence / identity 模式前置校验：绑定模型类别表含在岗判定类 + ROI 格式
+  if (form.rule.detector === 'absence' || form.rule.detector === 'identity') {
+    if (roiError.value) {
+      ElMessage.warning('岗位区域格式错误，需为 [[x,y],...] 且坐标在 0~1')
+      return
+    }
+    const pc = form.rule.detector === 'identity' ? 'person' : form.rule.presence_class || 'person'
+    const bound = models.value.filter((m: any) => form.model_ids.includes(m.id))
+    const hasClass = bound.some((m: any) => {
+      try {
+        return Object.values(JSON.parse(m.category_map || '{}')).includes(pc)
+      } catch {
+        return false
+      }
+    })
+    if (!hasClass) {
+      const cn = categories.value.find((c) => c.code === pc)?.name || pc
+      ElMessage.warning(`需绑定类别表含「${cn}」的检测模型${pc !== 'person' ? `（如自训的 ${pc} 产物模型）` : '（如 yolo11n-coco）'}`)
+      return
+    }
+    if (form.rule.detector === 'identity' && editingId.value && staffCount.value === 0) {
+      ElMessage.warning('人岗验证需要先登记至少一名员工档案（表单内"管理员工档案"）；未登记时该事件不会告警')
+      return
+    }
+  }
   saving.value = true
   try {
     if (editingId.value) {
@@ -513,7 +863,7 @@ async function handleSave() {
         description: form.description,
         category_codes: form.category_codes,
         model_ids: form.model_ids,
-        rule: form.rule,
+        rule: ruleForSubmit(),
       })
       ElMessage.success('更新成功')
     } else {
@@ -522,7 +872,7 @@ async function handleSave() {
         description: form.description,
         category_codes: form.category_codes,
         model_ids: form.model_ids,
-        rule: form.rule,
+        rule: ruleForSubmit(),
       })
       ElMessage.success('创建成功')
     }

@@ -422,13 +422,44 @@ class TrainManager:
             train_note = str(json.loads(job.params or "{}").get("note", "")).strip()[:200]
         except (ValueError, TypeError):
             train_note = ""
+        # 产物类别表：与本次训练所选类别一致（数据集 data.yaml names 即此顺序）。
+        # 同集合续训时等于基座表；增删类别/新类别（迁移学习）时按所选顺序重建，
+        # 不能沿用基座表——检测头已重建，沿用会导致推理端索引错位。
+        try:
+            train_codes = list(json.loads(job.params or "{}").get("category_codes") or [])
+        except (ValueError, TypeError):
+            train_codes = []
+        if train_codes:
+            prod_map = json.dumps({str(i): c for i, c in enumerate(train_codes)}, ensure_ascii=False)
+        else:
+            prod_map = base.category_map if base else "{}"
+        # 产物输入尺寸：读 ONNX 真实形状（自查 2026-09-30 P1：此前抄基座 640，
+        # 与训练 imgsz=416 的产物不符；推理引擎虽以文件为准不受影响，但 DB
+        # 字段失实会误导展示与任何信任它的逻辑）。失败回退 params.imgsz。
+        prod_input = 0
+        try:
+            import onnxruntime as _ort
+
+            _sess = _ort.InferenceSession(str(onnx_dst), providers=["CPUExecutionProvider"])
+            _shape = _sess.get_inputs()[0].shape
+            if len(_shape) >= 4 and isinstance(_shape[2], int):
+                prod_input = _shape[2]
+        except Exception:  # noqa: BLE001
+            prod_input = 0
+        if prod_input <= 0:
+            try:
+                prod_input = int(json.loads(job.params or "{}").get("imgsz") or 0)
+            except (ValueError, TypeError):
+                prod_input = 0
+        if prod_input <= 0:
+            prod_input = base.input_size if base else 640
         model = AIVisionModel(
             name=new_name,
             file_path=f"assets/models/{new_name}.onnx",
             sha256=sha,
             file_size=onnx_dst.stat().st_size,
-            category_map=base.category_map if base else "{}",
-            input_size=base.input_size if base else 640,
+            category_map=prod_map,
+            input_size=prod_input,
             source="trained",
             parent_model_id=job.base_model_id,
             license_note=(

@@ -187,6 +187,30 @@ async def _seed_categories(db: AsyncSession) -> None:
             "coco_map": {"1": "smoke"},
             "description": "烟雾检测（需自训练模型）",
         },
+        {
+            "code": "absence",
+            "name": "离岗",
+            "icon": "UserFilled",
+            "source": "builtin",
+            "coco_map": {},
+            "description": "岗位区域持续无人（离岗检测事件告警类别）",
+        },
+        {
+            "code": "wrong_person",
+            "name": "非授权人员在岗",
+            "icon": "Warning",
+            "source": "builtin",
+            "coco_map": {},
+            "description": "在岗人员与登记员工体貌不符（人岗验证事件告警类别）",
+        },
+        {
+            "code": "lifeguard",
+            "name": "救生员",
+            "icon": "Avatar",
+            "source": "builtin",
+            "coco_map": {},
+            "description": "救生员（特定制服）检测类别：样本库标注此类别后可在工作台训练针对性检测模型，供救生员离岗检测使用",
+        },
     ]
 
     existing_codes = set(

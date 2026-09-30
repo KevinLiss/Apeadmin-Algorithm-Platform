@@ -39,9 +39,17 @@
           </el-text>
         </el-form-item>
         <el-form-item label="训练类别">
-          <el-select v-model="form.category_codes" multiple style="width: 340px" placeholder="须与基座类别表一致" @change="loadPreview">
-            <el-option v-for="c in baseNames" :key="c" :label="categoryName(c)" :value="c" />
+          <el-select v-model="form.category_codes" multiple style="width: 340px" placeholder="选择要检测的类别" @change="loadPreview">
+            <el-option v-for="c in categories" :key="c.code" :label="c.name" :value="c.code">
+              <span>{{ c.name }}</span>
+              <el-text size="small" :type="baseNames.includes(c.code) ? 'success' : 'warning'" style="margin-left: 8px">
+                {{ baseNames.includes(c.code) ? '基座已有' : '新类别' }}
+              </el-text>
+            </el-option>
           </el-select>
+          <el-text v-if="newCats.length" size="small" type="warning" style="display: block; margin-top: 4px">
+            含基座表外新类别（{{ newCats.join('、') }}）＝迁移学习微调：检测头按所选类别重建，产物模型只认所选类别；需先在样本库标注该类别的样本（建议 ≥50 张）
+          </el-text>
         </el-form-item>
         <el-form-item label="样本范围">
           <el-radio-group v-model="scopeMode" @change="loadPreview">
@@ -508,6 +516,8 @@ const baseNames = computed<string[]>(() => {
   }
 })
 const trainableModels = computed(() => models.value.filter((m) => m.pt_path || m.source === 'trained'))
+/** 所选类别中不在基座类别表里的＝新类别（迁移学习训新类） */
+const newCats = computed(() => form.category_codes.filter((c) => !baseNames.value.includes(c)))
 // 与后端 create_train_job 门槛一致：≥5 张（8:2 划分后训练集 ≥4）
 const canCreate = computed(() => !!form.base_model_id && form.category_codes.length > 0 && (preview.value?.samples ?? 0) >= 5)
 
