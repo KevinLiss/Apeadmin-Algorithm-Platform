@@ -136,10 +136,18 @@ async def preview_dataset(
             cn = b.get("class_name")
             if cn in per_class:
                 per_class[cn] += 1
+    # 背景负样本候选（skipped）数量——前端 bg_ratio 提示用
+    bg_stmt = select(AIVisionSample).where(AIVisionSample.label_status == "skipped")
+    if folder == "__none__":
+        bg_stmt = bg_stmt.where(AIVisionSample.folder == "")
+    elif folder:
+        bg_stmt = bg_stmt.where(AIVisionSample.folder == folder)
+    bg_count = (await db.execute(select(func.count()).select_from(bg_stmt.subquery()))).scalar() or 0
     return success_response(data={
         "samples": len(picked),
         "per_class": per_class,
         "sample_ids": [s.id for s in picked],
+        "bg_candidates": bg_count,
     })
 
 
@@ -206,8 +214,25 @@ async def create_train_job(
         scope = "所选样本" if body.sample_ids else (f"分组「{body.folder}」" if body.folder else "样本库")
         raise HTTPException(
             status_code=400,
-            detail=f"{scope}中含所选类别标注的样本仅 {len(samples)} 张（至少 5 张，保证训练集 ≥4）",
-        )
+            detail=f"{scope}中含所选类别标注的样本仅 {len(samples)} 张（至少 5 张，保证训练集 ≥4）",        )
+
+    # 背景负样本（主动学习：误报图人工标"跳过"后进这里）：bg_ratio>0 才查，
+    # 与正样本同 folder/sample_ids 范围口径；build_dataset 内按 ratio 抽样
+    bg_samples: list[AIVisionSample] = []
+    if body.bg_ratio > 0:
+        bg_stmt = select(AIVisionSample).where(AIVisionSample.label_status == "skipped")
+        if body.sample_ids:
+            # 手动勾选模式：背景图不受 sample_ids 限制（勾选的是正样本），
+            # 但仍限定同分组，避免跨场景混入
+            if body.folder == "__none__":
+                bg_stmt = bg_stmt.where(AIVisionSample.folder == "")
+            elif body.folder:
+                bg_stmt = bg_stmt.where(AIVisionSample.folder == body.folder)
+        elif body.folder == "__none__":
+            bg_stmt = bg_stmt.where(AIVisionSample.folder == "")
+        elif body.folder:
+            bg_stmt = bg_stmt.where(AIVisionSample.folder == body.folder)
+        bg_samples = list((await db.execute(bg_stmt)).scalars().all())
 
     if get_train_manager().active_job_id() is not None:
         raise HTTPException(status_code=409, detail="已有训练任务在运行（单机互斥），请等待完成或取消")
@@ -239,6 +264,9 @@ async def create_train_job(
     samples_snapshot = [
         {"id": s.id, "file_path": s.file_path, "label_data": s.label_data, "label_status": s.label_status}
         for s in samples
+    ] + [
+        {"id": s.id, "file_path": s.file_path, "label_data": s.label_data, "label_status": s.label_status}
+        for s in bg_samples
     ]
 
     # 后台线程拉起子进程（launch 内含数据集构建，可能抛样本不足）
@@ -301,6 +329,34 @@ async def get_train_log(
     return success_response(data={"lines": lines[-tail:]})
 
 
+@router.get("/{job_id}/progress")
+async def get_train_progress(
+    job_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+    _perm: Annotated[User, Depends(_require_perm("ai_vision:train:list"))],
+):
+    """逐 epoch 训练曲线数据（train_runner 写的 progress.jsonl 全量）。
+
+    运行中任务也可拉——每 epoch 追加一行，前端轮询画布即可动态增长。
+    """
+    item = await db.get(AIVisionTraining, job_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="训练任务不存在")
+    p = train_runs_dir() / str(job_id) / "progress.jsonl"
+    records = []
+    if p.exists():
+        for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                records.append(json.loads(ln))
+            except ValueError:
+                continue
+    return success_response(data={"epochs_total": item.params and json.loads(item.params or "{}").get("epochs", 0), "records": records})
+
+
 @router.post("/{job_id}/cancel")
 async def cancel_train_job(
     job_id: int,
@@ -320,6 +376,46 @@ async def cancel_train_job(
         item.finished_at = datetime.now(timezone.utc)
         await db.commit()
     return success_response(msg="已发送取消指令" if ok else "进程已结束")
+
+
+@router.get("/{job_id}/samples")
+async def get_train_samples(
+    job_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+    _perm: Annotated[User, Depends(_require_perm("ai_vision:train:list"))],
+):
+    """训练任务的样本快照（数据集版本视图，优化项22）。
+
+    按 sample_ids 里记录的 ID 反查当前样本库：仍在的返回图片+标注框，
+    已删除的标记 missing（前端灰显"已删除"）——这样"当初用了哪些图"
+    永远可追溯，即使样本后来被清理。
+    """
+    item = await db.get(AIVisionTraining, job_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="训练任务不存在")
+    try:
+        ids = json.loads(item.sample_ids or "[]")
+    except (ValueError, TypeError):
+        ids = []
+    rows = {}
+    if ids:
+        found = (await db.execute(
+            select(AIVisionSample).where(AIVisionSample.id.in_(ids))
+        )).scalars().all()
+        rows = {s.id: s for s in found}
+    out = []
+    for sid in ids:
+        s = rows.get(sid)
+        if s:
+            out.append({
+                "id": sid, "missing": False, "file_path": s.file_path,
+                "label_status": s.label_status, "label_data": s.label_data,
+                "category_code": s.category_code, "folder": s.folder,
+            })
+        else:
+            out.append({"id": sid, "missing": True})
+    return success_response(data={"total": len(ids), "present": len(rows), "items": out})
 
 
 @router.delete("/{job_id}")

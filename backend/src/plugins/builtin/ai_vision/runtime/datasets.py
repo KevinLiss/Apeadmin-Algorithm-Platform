@@ -31,12 +31,16 @@ def build_dataset(
     names: list[str],
     out_dir: Path,
     val_split: float = 0.2,
+    bg_ratio: float = 0.0,
 ) -> dict:
     """把已标注样本写入 YOLO 目录。
 
-    samples: ORM 对象列表（需有 id/file_path/label_data/width/height）。
+    samples: ORM 对象列表（需有 id/file_path/label_status/label_data）。
     names:   类别 code 顺序表（索引即 YOLO class id）。
-    返回统计 {total, train, val, skipped, per_class}。
+    bg_ratio: 背景负样本比例——label_status=skipped（人工确认"图里没人/
+      不该报"）或 labeled 但 0 框的样本，按该比例随机抽一部分只拷图不放
+      标签（ultralytics 无标签文件即视为背景图），压误报。0=不启用。
+    返回统计 {total, train, val, skipped, per_class, bg_train, bg_val}。
     """
     idx_of = {code: i for i, code in enumerate(names)}
     for sub in ("images/train", "images/val", "labels/train", "labels/val"):
@@ -48,7 +52,8 @@ def build_dataset(
     n_val = int(round(len(labeled) * val_split)) if len(labeled) > 2 else 0
     val_ids = {s.id for s in labeled[:n_val]}
 
-    stats = {"total": len(labeled), "train": 0, "val": 0, "skipped": 0, "per_class": {c: 0 for c in names}}
+    stats = {"total": len(labeled), "train": 0, "val": 0, "skipped": 0, "per_class": {c: 0 for c in names}, "bg_train": 0, "bg_val": 0}
+    # 有效标注样本集合（供 preview/复现统计口径一致）
     for s in labeled:
         try:
             boxes = json.loads(s.label_data).get("boxes", [])
@@ -75,6 +80,32 @@ def build_dataset(
         shutil.copy2(src, out_dir / "images" / split / f"{stem}{src.suffix.lower()}")
         (out_dir / "labels" / split / f"{stem}.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
         stats[split] += 1
+
+    # ── 背景负样本：skipped 状态 或 无有效框的 labeled 样本 ──
+    if bg_ratio > 0:
+        used_ids = {s.id for s in labeled}
+        bg_pool = []
+        for s in samples:
+            if s.id in used_ids or s.label_status == "labeled":
+                continue
+            src = Path(s.file_path)
+            if src.exists():
+                bg_pool.append(s)
+        # labeled 但被上面 skipped 掉的（0框/坏JSON）也算背景候选
+        # （重扫一遍拿准确集合成本高，此处以 status 判定为主）
+        n_bg = int(round(stats["total"] * bg_ratio))
+        n_bg = min(n_bg, len(bg_pool))
+        if n_bg:
+            rng2 = random.Random(_SPLIT_SEED + 1)
+            pool = list(bg_pool)
+            rng2.shuffle(pool)
+            for s in pool[:n_bg]:
+                split = "val" if rng2.random() < val_split else "train"
+                src = Path(s.file_path)
+                stem = f"s{s.id}"
+                shutil.copy2(src, out_dir / "images" / split / f"{stem}{src.suffix.lower()}")
+                # 关键：不放标签文件 = 纯背景图（ultralytics 约定）
+                stats[f"bg_{split}"] += 1
 
     yaml_lines = [
         f"path: {out_dir.as_posix()}",

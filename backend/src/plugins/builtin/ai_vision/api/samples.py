@@ -36,6 +36,21 @@ _SAMPLES_DIR = samples_dir()
 _ALLOWED_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
+def imread_any(path: str):
+    """cv2.imread 在 Windows 下读不了中文路径（分组目录如"公开泳池俯视"），
+    统一走 np.fromfile + imdecode（外部导入样本的预标注/尺寸解析都用它）。"""
+    import cv2
+    import numpy as np
+
+    try:
+        buf = np.fromfile(path, dtype=np.uint8)
+    except OSError:
+        return None
+    if buf.size == 0:
+        return None
+    return cv2.imdecode(buf, cv2.IMREAD_COLOR)
+
+
 def _parse_ids(body: dict) -> list[int]:
     """批量接口 sample_ids 统一校验：非数字元素报 400 而非 500（自查 P2-9）。"""
     raw = body.get("sample_ids")
@@ -89,6 +104,55 @@ async def list_samples(
     })
 
 
+@router.get("/suggestions")
+async def training_suggestions(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+    _perm: Annotated[User, Depends(_require_perm("ai_vision:sample:list"))],
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    """主动学习建议清单（智能建议卡片数据源）。
+
+    两类建议（都排除已转过样本的告警——按 file_path 里 alarm_{id}_ 前缀去重）：
+    - negative：误报告警未转样本 → 建议转负样本（skipped 背景图压误报）
+    - positive：已确认(critical/高置信)告警未转样本 → 建议转样本后标注
+    """
+    from src.plugins.builtin.ai_vision.models import AIVisionAlarm
+
+    # 已转样本的告警 id（file_path 含 alarm_{id}_ 视为已转）
+    sample_paths = (await db.execute(
+        select(AIVisionSample.file_path)
+    )).scalars().all()
+    converted = set()
+    for p in sample_paths:
+        name = (p or "").split("\\")[-1].split("/")[-1]
+        if name.startswith("alarm_"):
+            try:
+                converted.add(int(name.split("_")[1]))
+            except (ValueError, IndexError):
+                pass
+
+    async def _pick(cond):
+        stmt = select(AIVisionAlarm).where(cond)
+        rows = (await db.execute(stmt)).scalars().all()
+        # 仅推荐有"干净原图"的告警：旧告警只有烧录了检测框/置信度的画框图，
+        # 转样本（无论正负）都会把红框像素喂给模型污染训练（二轮自检 P3-2）
+        rows = [r for r in rows if r.id not in converted and getattr(r, "clean_snapshot_path", "")]
+        rows.sort(key=lambda r: r.confidence, reverse=True)
+        return rows[:limit]
+
+    fp = await _pick(AIVisionAlarm.status == "false_positive")
+    pos = await _pick(AIVisionAlarm.status == "acknowledged")
+    return success_response(data={
+        "negative": [{"alarm_id": a.id, "camera_id": a.camera_id, "event_id": a.event_id,
+                      "category_code": a.category_code, "confidence": a.confidence,
+                      "snapshot": a.snapshot_path, "note": a.note} for a in fp],
+        "positive": [{"alarm_id": a.id, "camera_id": a.camera_id, "event_id": a.event_id,
+                      "category_code": a.category_code, "confidence": a.confidence,
+                      "snapshot": a.snapshot_path} for a in pos],
+    })
+
+
 @router.post("/upload")
 async def upload_samples(
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -133,7 +197,7 @@ async def upload_samples(
         try:
             import cv2
 
-            img = cv2.imread(str(dest))
+            img = imread_any(str(dest))
             if img is not None:
                 height, width = img.shape[:2]
         except Exception:  # noqa: BLE001
@@ -268,7 +332,7 @@ async def prelabel_sample(
     try:
         import cv2
 
-        frame = cv2.imread(str(img_path))
+        frame = imread_any(str(img_path))
         if frame is None:
             raise HTTPException(status_code=400, detail="图片无法解码")
         h, w = frame.shape[:2]
@@ -474,7 +538,7 @@ async def batch_prelabel_samples(
             failed += 1
             continue
         try:
-            frame = await asyncio.to_thread(cv2.imread, str(img_path))
+            frame = await asyncio.to_thread(imread_any, str(img_path))
             if frame is None:
                 failed += 1
                 continue
@@ -534,6 +598,42 @@ async def update_sample_label(
     await db.commit()
     await db.refresh(item)
     return success_response(data=_parse_out(item), msg="标注已保存" if body.boxes else "已取消标注")
+
+
+@router.put("/{sample_id}/status")
+async def set_sample_status(
+    sample_id: int,
+    body: dict,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+    _perm: Annotated[User, Depends(_require_perm("ai_vision:sample:edit"))],
+):
+    """设置样本标注状态（主动学习负样本标记）。
+
+    body: {"label_status": "skipped" | "unlabeled" | "labeled"}
+    skipped = "确认图中无目标/不该报"，训练 bg_ratio>0 时作背景负样本。
+    labeled 仅当样本确有标注框时允许（"取消跳过"恢复原状态用，自查 P1-2）。
+    """
+    st = str(body.get("label_status", "")).strip()
+    if st not in ("skipped", "unlabeled", "labeled"):
+        raise HTTPException(status_code=400, detail="label_status 仅支持 skipped/unlabeled/labeled")
+    item = await db.get(AIVisionSample, sample_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="样本不存在")
+    if st == "labeled":
+        try:
+            boxes = json.loads(item.label_data or "{}").get("boxes", [])
+        except (ValueError, TypeError):
+            boxes = []
+        if not boxes:
+            raise HTTPException(status_code=400, detail="该样本没有标注框，不能恢复为已标注")
+    item.label_status = st
+    await db.commit()
+    await db.refresh(item)
+    return success_response(
+        data=_parse_out(item),
+        msg={"skipped": "已标记为负样本（背景图）", "labeled": "已恢复为已标注"}.get(st, "已恢复未标注"),
+    )
 
 
 @router.delete("/{sample_id}")

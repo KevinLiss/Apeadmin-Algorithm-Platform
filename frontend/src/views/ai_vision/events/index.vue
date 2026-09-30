@@ -41,6 +41,16 @@
           <el-text size="small" :type="row.model_ids?.length ? '' : 'danger'">{{ row.model_ids?.length || 0 }} 个</el-text>
         </template>
       </el-table-column>
+      <el-table-column label="7天质量" width="120">
+        <template #default="{ row }">
+          <el-tooltip v-if="row.quality?.alarms_7d" :content="row.quality.tip || `近7天 ${row.quality.alarms_7d} 条告警，误报率 ${(row.quality.fp_rate * 100).toFixed(0)}%，状态良好`" placement="top">
+            <el-tag size="small" :type="row.quality.tip ? (row.quality.fp_rate >= 0.5 ? 'danger' : 'warning') : 'success'">
+              误报 {{ (row.quality.fp_rate * 100).toFixed(0) }}%
+            </el-tag>
+          </el-tooltip>
+          <el-text v-else size="small" type="info">无告警</el-text>
+        </template>
+      </el-table-column>
       <el-table-column label="创建时间" width="170">
         <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
       </el-table-column>

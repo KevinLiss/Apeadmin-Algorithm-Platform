@@ -259,6 +259,7 @@ class TrainJobCreate(BaseModel):
     batch: int = Field(default=4, ge=1, le=16)
     lr0: float = Field(default=0.01, gt=0.0, le=0.1)
     val_split: float = Field(default=0.2, ge=0.05, le=0.5, description="验证集划分比例")
+    bg_ratio: float = Field(default=0.0, ge=0.0, le=0.5, description="背景负样本比例（skipped 样本按此比例混入，压误报；0=不启用）")
     note: str = Field(default="", max_length=200)
 
 

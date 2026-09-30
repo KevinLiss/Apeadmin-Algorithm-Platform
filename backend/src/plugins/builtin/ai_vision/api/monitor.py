@@ -147,12 +147,20 @@ async def monitor_status(
     pending_total = (await db.execute(
         select(func.count(AIVisionAlarm.id)).where(AIVisionAlarm.status == "pending")
     )).scalar_one()
+    # 昨日告警数（北京日切前一日窗口）——指标卡"较昨日"微趋势用
+    yesterday_start = day_start - timedelta(days=1)
+    yesterday_total = (await db.execute(
+        select(func.count(AIVisionAlarm.id)).where(
+            AIVisionAlarm.created_at >= yesterday_start, AIVisionAlarm.created_at < day_start
+        )
+    )).scalar_one()
 
     from src.plugins.builtin.ai_vision.runtime.manager import get_manager
 
     workers = get_manager().list_workers()
     return success_response(data={
         "today_alarms": int(today_total or 0),
+        "yesterday_alarms": int(yesterday_total or 0),
         "pending_alarms": int(pending_total or 0),
         "workers": workers,
         "active_workers": len(workers),

@@ -21,41 +21,65 @@
           <el-col :span="6">
             <el-card shadow="never">
               <div class="stat-card">
-                <div class="stat-label">今日告警</div>
-                <div class="stat-value danger">{{ status.today_alarms ?? 0 }}</div>
+                <div class="stat-icon si-danger"><el-icon :size="20"><Bell /></el-icon></div>
+                <div class="stat-text">
+                  <div class="stat-label">今日告警</div>
+                  <div class="stat-value danger">{{ status.today_alarms ?? 0 }}</div>
+                  <div class="stat-trend" v-if="status.yesterday_alarms != null">
+                    <template v-if="(status.today_alarms ?? 0) > (status.yesterday_alarms ?? 0)">
+                      <span class="trend-up">↑ 较昨日 +{{ (status.today_alarms ?? 0) - (status.yesterday_alarms ?? 0) }}</span>
+                    </template>
+                    <template v-else-if="(status.today_alarms ?? 0) < (status.yesterday_alarms ?? 0)">
+                      <span class="trend-down">↓ 较昨日 -{{ (status.yesterday_alarms ?? 0) - (status.today_alarms ?? 0) }}</span>
+                    </template>
+                    <template v-else><span class="trend-flat">与昨日持平</span></template>
+                  </div>
+                </div>
               </div>
             </el-card>
           </el-col>
           <el-col :span="6">
             <el-card shadow="never">
               <div class="stat-card">
-                <div class="stat-label">待处理</div>
-                <div class="stat-value warning">{{ status.pending_alarms ?? 0 }}</div>
+                <div class="stat-icon si-warning"><el-icon :size="20"><Clock /></el-icon></div>
+                <div class="stat-text">
+                  <div class="stat-label">待处理</div>
+                  <div class="stat-value warning">{{ status.pending_alarms ?? 0 }}</div>
+                  <div class="stat-trend"><span class="trend-flat">{{ (status.pending_alarms ?? 0) > 0 ? '需人工处置' : '已清空' }}</span></div>
+                </div>
               </div>
             </el-card>
           </el-col>
           <el-col :span="6">
             <el-card shadow="never">
               <div class="stat-card">
-                <div class="stat-label">运行中视频源</div>
-                <div class="stat-value">{{ status.active_workers ?? 0 }}<span class="unit"> 路</span></div>
+                <div class="stat-icon si-primary"><el-icon :size="20"><VideoCamera /></el-icon></div>
+                <div class="stat-text">
+                  <div class="stat-label">运行中视频源</div>
+                  <div class="stat-value">{{ status.active_workers ?? 0 }}<span class="unit"> 路</span></div>
+                  <div class="stat-trend"><span class="trend-flat">上限 4 路（CPU）</span></div>
+                </div>
               </div>
             </el-card>
           </el-col>
           <el-col :span="6">
             <el-card shadow="never">
               <div class="stat-card">
-                <div class="stat-label">当前源实际帧率</div>
-                <div class="stat-value">{{ currentFps != null ? currentFps.toFixed(1) : '—' }}<span class="unit"> fps</span></div>
+                <div class="stat-icon si-success"><el-icon :size="20"><Odometer /></el-icon></div>
+                <div class="stat-text">
+                  <div class="stat-label">当前源实际帧率</div>
+                  <div class="stat-value">{{ currentFps != null ? currentFps.toFixed(1) : '—' }}<span class="unit"> fps</span></div>
+                  <div class="stat-trend"><span class="trend-flat" :class="{ 'trend-down': currentFps != null && currentFps < 1 }">{{ currentFps != null && currentFps < 1 ? '偏低，建议降 fps 或缩 ROI' : '正常' }}</span></div>
+                </div>
               </div>
             </el-card>
           </el-col>
         </el-row>
 
-        <!-- 主区：左监控轨 / 中视频窗口 / 右信息 + 告警时间线 -->
+        <!-- 主区：左监控轨(与画面等高) / 中视频窗口 / 右信息 + 告警时间线 -->
         <div class="main-flex">
-          <!-- ── 左侧监控轨：全部任务卡片（开关=启停，点卡片=切画面）── -->
-          <div class="task-rail">
+          <!-- ── 左侧监控轨：限高与视频卡等高，内部滚动不撑页面 ── -->
+          <div class="task-rail" ref="taskRailRef">
             <div class="rail-header">
               <span class="rail-title">监控任务 <el-text size="small" type="info">({{ taskCards.length }})</el-text></span>
               <div class="rail-actions">
@@ -93,8 +117,13 @@
                     <span class="tc-sep">·</span>
                     <span>今日 <b :class="{ 'tc-alarm-hot': (t.today_alarms ?? 0) > 0 }">{{ t.today_alarms ?? 0 }}</b> 告警</span>
                   </template>
+                  <template v-else-if="t.last_alarm_at">
+                    <span>累计 {{ t.total_alarms ?? 0 }} 告警</span>
+                    <span class="tc-sep">·</span>
+                    <span>最后 {{ shortTime(t.last_alarm_at) }}</span>
+                  </template>
                   <template v-else>
-                    <span>已停止</span>
+                    <span>已停止 · 暂无告警记录</span>
                   </template>
                 </div>
               </div>
@@ -104,7 +133,7 @@
           <!-- ── 中+右：原监控布局不动 ── -->
           <el-row :gutter="16" class="main-row" style="flex: 1; min-width: 0">
           <el-col :span="16">
-            <el-card shadow="never" class="video-card">
+            <el-card shadow="never" class="video-card" ref="videoCardRef">
               <template #header>
                 <div class="video-header">
                   <span>{{ selectedCamera?.name || '实时画面' }}</span>
@@ -260,7 +289,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '@/api/request'
@@ -277,7 +306,6 @@ import {
   listEvents,
   ackAlarm,
   falsePositiveAlarm,
-  alarmToSample,
 } from '@/api/ai_vision/monitor'
 import AlarmsPage from '@/views/ai_vision/alarms/index.vue'
 import TasksPage from '@/views/ai_vision/tasks/index.vue'
@@ -396,6 +424,16 @@ function formatTs(sec: number) {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
 }
 
+/** 停止卡"最后告警"短格式：今天只显示时分，跨天显示月日 */
+function shortTime(iso: string) {
+  if (!iso) return '—'
+  const d = new Date(iso.endsWith('Z') || iso.includes('+') ? iso : iso + 'Z')
+  if (isNaN(d.getTime())) return '—'
+  const now = new Date()
+  if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })
+  return `${d.getMonth() + 1}-${d.getDate()} ${d.toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })}`
+}
+
 // ── 数据加载 ─────────────────────────────────────────
 async function fetchBase() {
   try {
@@ -484,6 +522,18 @@ async function startMonitor() {
 const taskCards = ref<any[]>([])
 const railLoading = ref(false)
 const railActing = ref(false)
+const taskRailRef = ref<HTMLElement | null>(null)
+const videoCardRef = ref<any>(null)
+let railRO: ResizeObserver | null = null
+
+/** 左栏高度实时跟随视频卡（画面 16:9 随列宽变，写死高度必不齐；
+ *  卡片再高也不撑页面——列表内部滚动） */
+function syncRailHeight() {
+  const cardEl = videoCardRef.value?.$el as HTMLElement | undefined
+  if (cardEl && taskRailRef.value) {
+    taskRailRef.value.style.height = `${cardEl.offsetHeight}px`
+  }
+}
 
 async function fetchTaskCards(silent = false) {
   // 有开关正在等启停结果时跳过静默刷新——整组替换会提前抹掉 loading 态（自查 P2-3）
@@ -495,15 +545,33 @@ async function fetchTaskCards(silent = false) {
     // 截断丢失——恰好是最稳定长跑的那批，自查 P2-2）
     const runRes: any = await listTasks({ page: 1, page_size: 100, status: 'running' })
     const running = norm(runRes.items || [])
-    // 全量分页收集（≤5 页=500 条封顶），剔除运行中的避免重复
-    const first: any = await listTasks({ page: 1, page_size: 100 })
-    let all: any[] = [...(first.items || [])]
-    const pages = Math.min(5, Math.ceil((first.total || 0) / 100))
-    for (let p = 2; p <= pages; p++) {
-      const r: any = await listTasks({ page: p, page_size: 100 })
-      all = all.concat(r.items || [])
+    let stopped: any[]
+    let needFull = false
+    if (silent) {
+      // 静默轮询只更新运行中卡片（1 个请求）；停止卡指标不随时间变化，沿用旧数据。
+      // 用"全库任务总数"轻量对账（page_size=1 只取 total）：数量变了说明
+      // 有任务被新建/删除（任务管理 tab 操作），停止卡沿用旧数据会留幽灵卡/
+      // 漏新卡（二轮自检 P3-3）——变了才补一次全量，平时仍是恒定开销。
+      const countRes: any = await listTasks({ page: 1, page_size: 1 })
+      if ((countRes.total ?? 0) !== taskCards.value.length) needFull = true
+      const runIds = new Set(running.map((t: any) => t.id))
+      stopped = norm(
+        taskCards.value
+          .filter((t: any) => !runIds.has(t.id))
+          .map((t: any) => (t.status === 'running' ? { ...t, status: 'stopped' } : t)),
+      )
     }
-    const stopped = norm(all.filter((t: any) => t.status !== 'running'))
+    if (!silent || needFull) {
+      // 全量分页收集（≤5 页=500 条封顶），剔除运行中的避免重复
+      const first: any = await listTasks({ page: 1, page_size: 100 })
+      let all: any[] = [...(first.items || [])]
+      const pages = Math.min(5, Math.ceil((first.total || 0) / 100))
+      for (let p = 2; p <= pages; p++) {
+        const r: any = await listTasks({ page: p, page_size: 100 })
+        all = all.concat(r.items || [])
+      }
+      stopped = norm(all.filter((t: any) => t.status !== 'running'))
+    }
     running.sort((a: any, b: any) => b.id - a.id)
     stopped.sort((a: any, b: any) => b.id - a.id)
     taskCards.value = [...running, ...stopped]
@@ -708,12 +776,21 @@ async function handleFalsePositive(a: any) {
 }
 
 async function handleToSample(a: any) {
+  const neg = a.status === 'false_positive'
   try {
-    await ElMessageBox.confirm('将该告警抓拍图转入样本库？', '提示', { type: 'info' })
-    await alarmToSample(a.id)
-    ElMessage.success('已转样本')
+    await ElMessageBox.confirm(
+      neg ? '该告警已标误报——将以「无标注负样本」转入（训练时作背景图压误报）。' : '将该告警抓拍图转入样本库？',
+      neg ? '转负样本' : '转样本',
+      { type: 'info' },
+    )
   } catch {
-    // cancel
+    return // cancel
+  }
+  try {
+    const res: any = await request.post(`/ai-vision/alarms/${a.id}/to-sample`, null, { params: { as_negative: neg ? 1 : 0 } })
+    ElMessage.success(res?.msg || (neg ? '已转负样本' : '已转样本'))
+  } catch {
+    // handled
   }
 }
 
@@ -752,12 +829,31 @@ onMounted(async () => {
 
   alarmTimer = window.setInterval(pollAlarms, 3000)
   statusTimer = window.setInterval(pollStatus, 5000)
+  // 左栏与视频卡等高：监听视频卡尺寸（列宽变化/源切换都触发）
+  ensureRailSync()
 })
+
+/** 挂左栏等高同步。live pane 是 v-if 渲染——深链进 tasks/records tab 时
+ *  视频卡不存在，必须等切回 live 再挂一次（自查 P2-4） */
+function ensureRailSync() {
+  nextTick(() => {
+    syncRailHeight()
+    const cardEl = videoCardRef.value?.$el as HTMLElement | undefined
+    if (!cardEl) return
+    if (!railRO && 'ResizeObserver' in window) railRO = new ResizeObserver(syncRailHeight)
+    railRO?.disconnect()
+    railRO?.observe(cardEl)
+  })
+}
+
+// 切回"实时监控"tab 时补挂同步
+watch(activeTab, (v) => { if (v === 'live') ensureRailSync() })
 
 onBeforeUnmount(() => {
   if (alarmTimer) window.clearInterval(alarmTimer)
   if (statusTimer) window.clearInterval(statusTimer)
   if (clockTimer) window.clearInterval(clockTimer)
+  if (railRO) { railRO.disconnect(); railRO = null }
   // 离开页面前主动把流 img 指向空白源：仅销毁 DOM 的话 Chrome 会挂起
   // 而非关闭 multipart 流，僵尸连接会占满同源连接池（切源卡加载根因）
   if (streamImgRef.value) streamImgRef.value.src = BLANK_SRC
@@ -772,12 +868,26 @@ onBeforeUnmount(() => {
 
 /* 指标卡（与统计看板同风格） */
 .stat-cards { margin-bottom: 16px; }
-.stat-card { text-align: center; padding: 6px 0; }
-.stat-label { color: #909399; font-size: 13px; margin-bottom: 8px; }
-.stat-value { font-size: 28px; font-weight: 600; color: #303133; }
+.stat-card { display: flex; align-items: center; gap: 14px; padding: 4px 0; text-align: left; }
+.stat-icon {
+  width: 44px; height: 44px; border-radius: 10px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+}
+.si-danger { background: var(--el-color-danger-light-9, #fef0f0); color: #f56c6c; }
+.si-warning { background: var(--el-color-warning-light-9, #fdf6ec); color: #e6a23c; }
+.si-primary { background: var(--el-color-primary-light-9, #ecf5ff); color: #409eff; }
+.si-success { background: var(--el-color-success-light-9, #f0f9eb); color: #67c23a; }
+.stat-text { min-width: 0; }
+.stat-label { color: #909399; font-size: 13px; margin-bottom: 2px; }
+.stat-value { font-size: 26px; font-weight: 600; color: #303133; line-height: 1.2; }
 .stat-value.danger { color: #f56c6c; }
 .stat-value.warning { color: #e6a23c; }
 .stat-value .unit { font-size: 13px; font-weight: 400; color: #909399; }
+.stat-trend { font-size: 12px; line-height: 1.4; margin-top: 2px; }
+.trend-up { color: #f56c6c; }
+.trend-down { color: #67c23a; }
+.trend-flat { color: #a8abb2; }
+.trend-flat.trend-down { color: #e6a23c; }
 
 /* 控制栏（旧深链样式保留兼容） */
 .control-bar { margin-bottom: 16px; }
@@ -791,8 +901,8 @@ onBeforeUnmount(() => {
 }
 @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 
-/* ── 左侧监控轨 ── */
-.main-flex { display: flex; gap: 16px; align-items: stretch; margin-bottom: 16px; }
+/* ── 左侧监控轨：JS 同步为与视频卡等高，内部滚动 ── */
+.main-flex { display: flex; gap: 16px; align-items: flex-start; margin-bottom: 16px; }
 .task-rail {
   width: 216px; flex-shrink: 0; display: flex; flex-direction: column;
   background: var(--el-bg-color, #fff);
@@ -800,13 +910,14 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 .rail-header {
+  flex-shrink: 0;
   display: flex; align-items: center; justify-content: space-between;
   padding: 8px 10px; border-bottom: 1px solid var(--el-border-color-lighter, #ebeef5);
   background: var(--el-fill-color-light, #f5f7fa);
 }
 .rail-title { font-size: 13px; font-weight: 600; color: #303133; }
 .rail-actions { display: flex; align-items: center; gap: 2px; }
-.rail-list { flex: 1; overflow-y: auto; max-height: 640px; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+.rail-list { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
 .task-card {
   border: 1px solid var(--el-border-color-lighter, #ebeef5); border-radius: 8px;
   padding: 8px 10px; cursor: pointer; background: var(--el-bg-color, #fff);

@@ -11,10 +11,11 @@
 - 测试成功更新 ``last_online_at`` 与 ``status``
 """
 from datetime import datetime, timezone
-
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -190,11 +191,72 @@ async def delete_camera(
     user: Annotated[User, Depends(get_current_user)],
     _perm: Annotated[User, Depends(_require_perm("ai_vision:camera:delete"))],
 ):
-    """删除摄像头（软删除）。"""
+    """删除摄像头（软删除）+ 级联清理（系统体检 P2-1/P3-4）。
+
+    - 关联任务：running 的先停 worker 再删；其余状态直接删——旧版只软删
+      摄像头不管任务，留下摄像头名为空的"僵尸任务"（实测 5 条）。
+    - 视频文件：video 源专属文件（无其他摄像头引用同一路径）连带物理删除，
+      uploads/videos 曾因此积至 228MB 孤儿。
+    """
     item = await _get_or_404(db, camera_id)
+
+    # 1) 级联任务
+    from src.plugins.builtin.ai_vision.models import AIVisionTask
+
+    tasks = (await db.execute(
+        select(AIVisionTask).where(AIVisionTask.camera_id == camera_id)
+    )).scalars().all()
+    stopped = deleted = 0
+    manager = None
+    for t in tasks:
+        if t.status == "running":
+            try:
+                import asyncio
+
+                from src.plugins.builtin.ai_vision.runtime.manager import get_manager
+
+                manager = get_manager()
+                await asyncio.to_thread(manager.stop_task, t.id, camera_id)
+                stopped += 1
+            except Exception as exc:  # noqa: BLE001 — 停不掉也要删记录（worker 可能已不在）
+                logger.warning(f"[AIVision] delete_camera#{camera_id}: stop task#{t.id} failed: {exc}")
+        await db.delete(t)
+        deleted += 1
+
+    # 2) 视频文件清理（仅 uploads 下、且无其他摄像头引用）
+    removed_file = ""
+    if item.source_type == "video" and item.rtsp_url:
+        from src.plugins.builtin.ai_vision.api.videos import videos_dir
+
+        vp = Path(item.rtsp_url)
+        try:
+            in_uploads = str(vp.resolve()).startswith(str(videos_dir().resolve()))
+            others = (await db.execute(
+                select(AIVisionCamera.id).where(
+                    AIVisionCamera.id != camera_id,
+                    AIVisionCamera.is_deleted == False,  # noqa: E712
+                    AIVisionCamera.rtsp_url == item.rtsp_url,
+                )
+            )).scalars().all()
+            if in_uploads and not others and vp.exists():
+                # 删除钩子可能抛 SystemExit，捕 BaseException 防杀进程
+                try:
+                    vp.unlink()
+                    removed_file = vp.name
+                except BaseException:  # noqa: BLE001
+                    pass
+        except OSError:
+            pass
+
+    # 3) 软删摄像头
     item.is_deleted = True
     await db.commit()
-    return success_response(msg="删除成功")
+    parts = []
+    if deleted:
+        parts.append(f"连带删除 {deleted} 个任务" + (f"（含停止运行中 {stopped}）" if stopped else ""))
+    if removed_file:
+        parts.append("视频文件已清理")
+    return success_response(msg="删除成功" + (f"（{'，'.join(parts)}）" if parts else ""))
 
 
 @router.post("/{camera_id}/test")

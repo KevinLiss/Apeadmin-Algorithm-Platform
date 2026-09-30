@@ -151,29 +151,42 @@ async def list_tasks(
             d["last_stats"] = live_by_task[item.id]
         result.append(d)
 
-    # 今日各任务告警数（监控台左栏卡片角标用；一次 group by，不逐任务查）
+    # 各任务告警统计（监控台左栏卡片用；一次 group by，不逐任务查）：
+    # today_alarms=今日(北京日切，与 /monitor/status 口径一致)、
+    # total_alarms=累计、last_alarm_at=最后告警时间（停止卡值班信息，自查优化项7）
     try:
         from datetime import datetime, time as dtime, timedelta, timezone
 
+        from sqlalchemy import func as _f
+
         from src.plugins.builtin.ai_vision.models import AIVisionAlarm
 
-        # "今日"按北京时间日切——与 /monitor/status 的 today_alarms 口径一致
-        # （created_at 为 naive UTC；北京今日零点对应的 naive UTC = 北京日期
-        #  00:00 减 8 小时）。UTC 零点日切会导致北京 0~8 点两处统计对不上。
         now_utc = datetime.now(timezone.utc)
         bj_today = (now_utc + timedelta(hours=8)).date()
         day_start = datetime.combine(bj_today, dtime.min, tzinfo=timezone.utc) - timedelta(hours=8)
-        rows = (await db.execute(
+        # 全量：累计数 + 最后告警时间
+        agg_rows = (await db.execute(
+            select(AIVisionAlarm.task_id, _f.count(), _f.max(AIVisionAlarm.created_at))
+            .group_by(AIVisionAlarm.task_id)
+        )).all()
+        agg = {r[0]: (r[1], r[2]) for r in agg_rows}
+        # 今日窗口
+        today_rows = (await db.execute(
             select(AIVisionAlarm.task_id, func.count())
             .where(AIVisionAlarm.created_at >= day_start)
             .group_by(AIVisionAlarm.task_id)
         )).all()
-        alarm_counts = dict(rows)
+        today_counts = dict(today_rows)
         for d in result:
-            d["today_alarms"] = alarm_counts.get(d["id"], 0)
+            d["today_alarms"] = today_counts.get(d["id"], 0)
+            cnt, last = agg.get(d["id"], (0, None))
+            d["total_alarms"] = cnt
+            d["last_alarm_at"] = last.isoformat() if last else ""
     except Exception:  # noqa: BLE001 — 角标失败不影响列表主体
         for d in result:
             d["today_alarms"] = 0
+            d["total_alarms"] = 0
+            d["last_alarm_at"] = ""
 
     return success_response(data={
         "total": total,

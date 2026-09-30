@@ -41,7 +41,7 @@
     </div>
 
     <!-- 列表 -->
-    <el-table v-if="total > 0 || loading" :data="tableData" v-loading="loading" stripe style="width: 100%; margin-top: 8px" @selection-change="(rows: any[]) => (selected = rows)">
+    <el-table v-if="total > 0 || loading" :data="tableData" v-loading="loading" stripe style="width: 100%; margin-top: 8px" :row-class-name="(s: any) => (s.row.level === 'critical' && s.row.status === 'pending' ? 'row-critical' : '')" @selection-change="(rows: any[]) => (selected = rows)">
       <el-table-column type="selection" width="45" />
       <el-table-column prop="id" label="ID" width="60" />
       <el-table-column label="抓拍图" width="90">
@@ -251,13 +251,20 @@ async function handleFalsePositive(row: any) {
 }
 
 async function handleToSample(row: any) {
+  const neg = row.status === 'false_positive'
   try {
-    await ElMessageBox.confirm('将该告警抓拍图转入样本库？', '提示', { type: 'info' })
+    await ElMessageBox.confirm(
+      neg
+        ? '该告警已标记误报——将以「无标注负样本」转入（训练时作背景图压误报，不带错误检测框）。'
+        : '将该告警抓拍图转入样本库？（干净原图 + 自动携带检测框标注）',
+      neg ? '转负样本' : '转样本',
+      { type: 'info' },
+    )
   } catch {
     return // 取消
   }
-  await request.post(`/ai-vision/alarms/${row.id}/to-sample`)
-  ElMessage.success('已转样本')
+  const res: any = await request.post(`/ai-vision/alarms/${row.id}/to-sample`, null, { params: { as_negative: neg ? 1 : 0 } })
+  ElMessage.success(res?.msg || (neg ? '已转负样本' : '已转样本'))
   await fetchList()
 }
 
@@ -353,6 +360,9 @@ async function batchRun(rows: any[], op: string, label: string, note = '') {
         await request.post(`/ai-vision/alarms/${r.id}/false-positive`, null, { params: { note } })
       } else if (op === 'delete') {
         await request.delete(`/ai-vision/alarms/${r.id}`)
+      } else if (op === 'to-sample') {
+        // 误报状态的告警自动转"负样本"（背景图压误报），其余转正样本
+        await request.post(`/ai-vision/alarms/${r.id}/to-sample`, null, { params: { as_negative: r.status === 'false_positive' ? 1 : 0 } })
       } else {
         await request.post(`/ai-vision/alarms/${r.id}/${op}`)
       }
@@ -378,6 +388,13 @@ onMounted(() => {
 
 <style scoped>
 .alarm-page { padding: 20px; }
+/* critical 待处理行：左侧红色竖条，值班扫一眼即锁定要紧告警 */
+:deep(.row-critical) td:first-child { position: relative; }
+:deep(.row-critical) td:first-child::before {
+  content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
+  background: var(--el-color-danger, #f56c6c);
+}
+:deep(.row-critical) { background: var(--el-color-danger-light-9, #fef0f0) !important; }
 .page-header { margin-bottom: 16px; }
 .page-header h2 { margin: 0 0 4px; font-size: 20px; }
 .page-header .text-muted { color: #999; font-size: 13px; margin: 0; }

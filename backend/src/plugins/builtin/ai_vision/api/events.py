@@ -91,11 +91,51 @@ async def list_events(
     total = (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar() or 0
     stmt = stmt.order_by(AIVisionEvent.id.desc()).offset((page - 1) * page_size).limit(page_size)
     items = (await db.execute(stmt)).scalars().all()
+
+    # 规则质量自检（近7天）：各事件告警数/误报数 → 误报率与建议（自查优化项14）。
+    # 一次 group by 双列统计，不逐事件查。
+    quality: dict[int, dict] = {}
+    try:
+        from datetime import datetime, time as dtime, timedelta, timezone
+
+        from sqlalchemy import case
+
+        from src.plugins.builtin.ai_vision.models import AIVisionAlarm
+
+        now_utc = datetime.now(timezone.utc)
+        bj_today = (now_utc + timedelta(hours=8)).date()
+        week_start = datetime.combine(bj_today - timedelta(days=6), dtime.min, tzinfo=timezone.utc) - timedelta(hours=8)
+        rows = (await db.execute(
+            select(
+                AIVisionAlarm.event_id,
+                func.count(),
+                func.sum(case((AIVisionAlarm.status == "false_positive", 1), else_=0)),
+            )
+            .where(AIVisionAlarm.created_at >= week_start)
+            .group_by(AIVisionAlarm.event_id)
+        )).all()
+        for eid, total_cnt, fp_cnt in rows:
+            fp_cnt = int(fp_cnt or 0)
+            rate = fp_cnt / total_cnt if total_cnt else 0
+            tip = ""
+            if total_cnt >= 5 and rate >= 0.5:
+                tip = "误报率过半：建议提高置信度阈值或缩短判定持续时长，并转误报为负样本复训"
+            elif total_cnt >= 5 and rate >= 0.3:
+                tip = "误报偏高：建议适当提高阈值，或用「智能建议」把误报图转负样本复训"
+            quality[eid] = {"alarms_7d": total_cnt, "false_positives_7d": fp_cnt, "fp_rate": round(rate, 3), "tip": tip}
+    except Exception:  # noqa: BLE001 — 质量统计失败不影响列表主体
+        pass
+
+    out = []
+    for item in items:
+        d = _parse_out(item)
+        d["quality"] = quality.get(item.id, {"alarms_7d": 0, "false_positives_7d": 0, "fp_rate": 0, "tip": ""})
+        out.append(d)
     return success_response(data={
         "total": total,
         "page": page,
         "page_size": page_size,
-        "items": [_parse_out(item) for item in items],
+        "items": out,
     })
 
 
@@ -213,12 +253,29 @@ async def delete_event(
     user: Annotated[User, Depends(get_current_user)],
     _perm: Annotated[User, Depends(_require_perm("ai_vision:event:delete"))],
 ):
-    """删除事件（软删除；运行中不允许删除）。"""
+    """删除事件（软删除；运行中不允许删除）。
+
+    级联（系统体检 P2-2）：引用该事件的 pending/stopped 任务一并删除——
+    旧版不管任务，留下事件名为空的僵尸任务；有 running 任务的事件本就
+    status=running 被上面拦截，双保险再查一次。
+    """
     item = await db.get(AIVisionEvent, event_id)
     if not item or item.is_deleted:
         raise HTTPException(status_code=404, detail="事件不存在")
     if item.status == "running":
         raise HTTPException(status_code=400, detail="运行中的事件不可删除，请先停止任务")
+    from src.plugins.builtin.ai_vision.models import AIVisionTask
+
+    ref_tasks = (await db.execute(
+        select(AIVisionTask).where(AIVisionTask.event_id == event_id)
+    )).scalars().all()
+    running_ref = [t for t in ref_tasks if t.status == "running"]
+    if running_ref:
+        raise HTTPException(status_code=400, detail=f"仍有 {len(running_ref)} 个运行中任务引用该事件，请先停止")
+    for t in ref_tasks:
+        await db.delete(t)
     item.is_deleted = True
     await db.commit()
-    return success_response(msg="删除成功")
+    return success_response(
+        msg=f"删除成功{f'（连带删除 {len(ref_tasks)} 个关联任务）' if ref_tasks else ''}",
+    )

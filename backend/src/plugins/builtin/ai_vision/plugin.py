@@ -176,6 +176,21 @@ class AIVisionPlugin(PluginInterface):
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[AIVision] index migration failed: {exc}")
 
+        # sys_log 保留 30 天（系统体检 P2-3：无清理机制 9 天已 2.5 万行只增）。
+        # created_at 为 naive UTC；删除失败不阻断启动。
+        try:
+            from datetime import datetime, timedelta, timezone
+
+            from src.db import engine as _engine
+
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+            async with _engine.begin() as conn:
+                r = await conn.execute(text("DELETE FROM sys_log WHERE created_at < :c"), {"c": cutoff})
+                if r.rowcount:
+                    logger.info(f"[AIVision] sys_log pruned {r.rowcount} rows older than 30d")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[AIVision] sys_log prune failed: {exc}")
+
     # ── 生命周期：卸载（清理）────────────────────────
     async def uninstall(self) -> None:
         """插件被卸载时调用（keep_data=False 时）。

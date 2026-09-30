@@ -211,7 +211,11 @@ class TrainManager:
         ds_dir.mkdir(parents=True, exist_ok=True)
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        stats = build_dataset(samples, names, ds_dir, val_split=float(params.get("val_split", 0.2)))
+        stats = build_dataset(
+            samples, names, ds_dir,
+            val_split=float(params.get("val_split", 0.2)),
+            bg_ratio=float(params.get("bg_ratio", 0.0)),
+        )
         if stats["train"] < 4:
             raise RuntimeError(f"训练集样本不足（{stats['train']} 张，至少 4 张已标注样本）")
 

@@ -28,6 +28,7 @@
         <el-select v-model="filters.label_status" placeholder="全部" clearable style="width: 130px" @change="handleFilterChange">
           <el-option label="未标注" value="unlabeled" />
           <el-option label="已标注" value="labeled" />
+          <el-option label="跳过（负样本）" value="skipped" />
         </el-select>
       </el-form-item>
       <el-form-item>
@@ -42,6 +43,36 @@
         </el-button>
       </el-form-item>
     </el-form>
+
+    <!-- ═══ 智能建议（主动学习）：误报→负样本 / 已确认→正样本 ═══ -->
+    <el-card v-if="sug.negative.length || sug.positive.length" shadow="never" class="sug-card">
+      <div class="sug-head">
+        <el-icon color="#e6a23c"><MagicStick /></el-icon>
+        <span class="sug-title">智能建议</span>
+        <span class="sug-tip">误报图转"负样本"、已确认真实告警转"正样本"——下次训练带上它们，模型会越来越准</span>
+        <el-button link size="small" style="margin-left: auto" :loading="sugLoading" @click="fetchSuggestions">刷新</el-button>
+      </div>
+      <div class="sug-body">
+        <div v-for="a in sug.negative" :key="'n' + a.alarm_id" class="sug-item">
+          <el-image :src="imageUrl(a.snapshot)" fit="cover" class="sug-thumb" :preview-src-list="[imageUrl(a.snapshot)]" preview-teleported />
+          <div class="sug-meta">
+            <el-tag size="small" type="danger">误报</el-tag>
+            <el-text size="small">{{ categoryName(a.category_code) }} {{ (a.confidence * 100).toFixed(0) }}%</el-text>
+            <el-text size="small" type="info">#{{ a.alarm_id }}</el-text>
+          </div>
+          <el-button size="small" type="warning" plain @click="toSample(a, 1)" v-permission="'ai_vision:alarm:edit'">转负样本</el-button>
+        </div>
+        <div v-for="a in sug.positive" :key="'p' + a.alarm_id" class="sug-item">
+          <el-image :src="imageUrl(a.snapshot)" fit="cover" class="sug-thumb" :preview-src-list="[imageUrl(a.snapshot)]" preview-teleported />
+          <div class="sug-meta">
+            <el-tag size="small" type="success">已确认</el-tag>
+            <el-text size="small">{{ categoryName(a.category_code) }} {{ (a.confidence * 100).toFixed(0) }}%</el-text>
+            <el-text size="small" type="info">#{{ a.alarm_id }}</el-text>
+          </div>
+          <el-button size="small" type="primary" plain @click="toSample(a, 0)" v-permission="'ai_vision:alarm:edit'">转正样本</el-button>
+        </div>
+      </div>
+    </el-card>
 
     <!-- 上传栏 -->
     <div class="upload-bar">
@@ -124,8 +155,8 @@
               <el-tag size="small" :type="s.source === 'upload' ? 'primary' : 'success'">
                 {{ s.source === 'upload' ? '上传' : '告警' }}
               </el-tag>
-              <el-tag size="small" :type="s.label_status === 'labeled' ? 'success' : 'info'">
-                {{ s.label_status === 'labeled' ? '已标注' : '未标注' }}
+              <el-tag size="small" :type="s.label_status === 'labeled' ? 'success' : s.label_status === 'skipped' ? 'warning' : 'info'">
+                {{ s.label_status === 'labeled' ? '已标注' : s.label_status === 'skipped' ? '跳过(负样本)' : '未标注' }}
               </el-tag>
               <el-tag v-if="s.folder" size="small" type="info" effect="plain">📁{{ s.folder }}</el-tag>
             </div>
@@ -135,6 +166,22 @@
             </div>
             <div class="sample-row">
               <el-button link type="primary" size="small" @click="openLabel(s)" v-permission="'ai_vision:sample:edit'">标注</el-button>
+              <el-button
+                v-if="s.label_status !== 'skipped'"
+                link
+                type="warning"
+                size="small"
+                @click="markSkipped(s)"
+                v-permission="'ai_vision:sample:edit'"
+              >跳过</el-button>
+              <el-button
+                v-else
+                link
+                type="info"
+                size="small"
+                @click="unmarkSkipped(s)"
+                v-permission="'ai_vision:sample:edit'"
+              >取消跳过</el-button>
               <el-button link type="danger" size="small" @click="handleDelete(s)" v-permission="'ai_vision:sample:delete'">删除</el-button>
             </div>
           </div>
@@ -161,8 +208,9 @@
       />
     </div>
 
-    <!-- ═══ 标注弹窗：图上拖框画 bbox ═══ -->
-    <el-dialog v-model="labelVisible" :title="`标注样本 #${labelSample?.id ?? ''}`" width="900px" top="4vh" @closed="onLabelClosed">
+    <!-- 标注弹窗：图上拖框画 bbox。禁用 Esc/遮罩关闭——Esc 已用作"取消选中框"，
+         点遮罩也会静默丢掉未保存标注（自查 P1-1 / 二轮 P2-1） -->
+    <el-dialog v-model="labelVisible" :title="`标注样本 #${labelSample?.id ?? ''}`" width="900px" top="4vh" :close-on-press-escape="false" :close-on-click-modal="false" @closed="onLabelClosed">
       <div class="label-wrap">
         <div class="label-canvas-box" ref="canvasBoxRef">
           <canvas
@@ -175,51 +223,75 @@
           ></canvas>
         </div>
         <div class="label-side">
-          <el-text size="small" type="info">拖拽画框；点击框可选中，Delete 删除选中框；改已有框类别用下方列表里的下拉</el-text>
-          <el-select v-model="labelClass" placeholder="新框类别（画新框用）" style="width: 100%; margin: 8px 0">
-            <el-option v-for="c in categories" :key="c.code" :label="`${c.name} (${c.code})`" :value="c.code" />
-          </el-select>
-          <!-- AI 预标注：模型选择 + 一键预填（结果需人工确认后保存） -->
-          <div class="label-ai-row">
-            <el-select v-model="prelabelModelId" placeholder="预标注模型" size="small" style="flex: 1">
-              <el-option
-                v-for="m in detectModels"
-                :key="m.id"
-                :label="`${m.name} v${m.version}`"
-                :value="m.id"
-              />
+          <!-- ① 画新框 -->
+          <div class="ls-group">
+            <div class="ls-group-title">画新框</div>
+            <el-select v-model="labelClass" placeholder="新框类别" style="width: 100%">
+              <el-option v-for="c in categories" :key="c.code" :label="`${c.name} (${c.code})`" :value="c.code" />
             </el-select>
-            <el-button size="small" type="primary" plain :loading="prelabeling" :disabled="!prelabelModelId" @click="runPrelabel" v-permission="'ai_vision:sample:edit'">
-              AI 预标注
+            <el-text size="small" type="info" class="ls-help">空白处拖拽画框 · 框内拖动=移动 · 拖四角=缩放 · Delete 删除 · Ctrl+Z 撤销</el-text>
+          </div>
+          <!-- ② AI 辅助 -->
+          <div class="ls-group">
+            <div class="ls-group-title">AI 辅助</div>
+            <div class="label-ai-row">
+              <el-select v-model="prelabelModelId" placeholder="预标注模型" size="small" style="flex: 1">
+                <el-option
+                  v-for="m in detectModels"
+                  :key="m.id"
+                  :label="`${m.name} v${m.version}`"
+                  :value="m.id"
+                />
+              </el-select>
+              <el-button size="small" type="primary" plain :loading="prelabeling" :disabled="!prelabelModelId" @click="runPrelabel" v-permission="'ai_vision:sample:edit'">
+                预标注
+              </el-button>
+            </div>
+            <el-button
+              v-if="labelBoxes.some((b) => b.conf != null)"
+              size="small"
+              type="success"
+              plain
+              style="width: 100%"
+              @click="acceptAllAiBoxes"
+            >
+              一键接受全部 AI 框（{{ labelBoxes.filter((b) => b.conf != null).length }} 个）
             </el-button>
           </div>
-          <div class="label-box-list">
-            <div
-              v-for="(b, i) in labelBoxes"
-              :key="i"
-              class="label-box-item"
-              :class="{ active: selectedBox === i }"
-              @click="selectedBox = i"
-            >
-              <!-- 每个框可独立改类别（改的是这个框自己，与"新框类别"下拉无关） -->
-              <el-select
-                v-model="b.class_name"
-                size="small"
-                style="width: 118px"
-                @click.stop
-                @change="onBoxClassChange(b)"
+          <!-- ③ 框列表（逐框改类别） -->
+          <div class="ls-group ls-grow">
+            <div class="ls-group-title">标注框（{{ labelBoxes.length }}）</div>
+            <div class="label-box-list">
+              <div
+                v-for="(b, i) in labelBoxes"
+                :key="i"
+                class="label-box-item"
+                :class="{ active: selectedBox === i }"
+                @click="selectedBox = i"
+                @mouseenter="onListHover(i)"
+                @mouseleave="onListHover(-1)"
               >
-                <el-option v-for="c in categories" :key="c.code" :label="c.name" :value="c.code" />
-              </el-select>
-              <el-tag v-if="b.conf != null" size="small" type="info">AI {{ (b.conf * 100).toFixed(0) }}%</el-tag>
-              <el-text size="small" type="info">({{ b.x.toFixed(2) }},{{ b.y.toFixed(2) }})</el-text>
-              <el-button link type="danger" size="small" @click.stop="labelBoxes.splice(i, 1); selectedBox = -1">删</el-button>
+                <!-- 每个框可独立改类别（改的是这个框自己，与"新框类别"下拉无关） -->
+                <el-select
+                  v-model="b.class_name"
+                  size="small"
+                  style="width: 106px"
+                  @click.stop
+                  @change="onBoxClassChange(b)"
+                >
+                  <el-option v-for="c in categories" :key="c.code" :label="c.name" :value="c.code" />
+                </el-select>
+                <el-tag v-if="b.conf != null" size="small" type="info">AI {{ (b.conf * 100).toFixed(0) }}%</el-tag>
+                <el-button link type="danger" size="small" @click.stop="snapshot(); labelBoxes.splice(i, 1); selectedBox = -1; drawCanvas()">删</el-button>
+              </div>
+              <el-text v-if="!labelBoxes.length" size="small" type="info">暂无框，去图上拖一个</el-text>
             </div>
-            <el-text v-if="!labelBoxes.length" size="small" type="info">暂无框</el-text>
           </div>
-          <div class="label-actions">
-            <el-button size="small" @click="labelBoxes = []; selectedBox = -1">清空</el-button>
-            <el-button size="small" type="primary" :loading="labelSaving" @click="saveLabel">保存标注</el-button>
+          <!-- ④ 操作 -->
+          <div class="ls-group ls-actions">
+            <el-button size="small" text :disabled="!undoStack.length" @click="undo">撤销{{ undoStack.length ? `(${undoStack.length})` : '' }}</el-button>
+            <el-button size="small" text type="warning" @click="snapshot(); labelBoxes = []; selectedBox = -1; drawCanvas()">清空</el-button>
+            <el-button size="small" type="primary" :loading="labelSaving" @click="saveLabel" style="flex: 1">保存标注</el-button>
           </div>
         </div>
       </div>
@@ -231,7 +303,7 @@
 defineProps<{ embedded?: boolean }>()
 import { ref, reactive, computed, onMounted, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh, UploadFilled, ArrowRight } from '@element-plus/icons-vue'
+import { Refresh, UploadFilled, ArrowRight, MagicStick } from '@element-plus/icons-vue'
 import type { UploadFile, UploadFiles } from 'element-plus'
 import { useRouter } from 'vue-router'
 import request from '@/api/request'
@@ -325,6 +397,75 @@ async function fetchList() {
 function handleFilterChange() {
   page.value = 1
   fetchList()
+}
+
+// ── 主动学习：智能建议 + 跳过标记 ───────────────────
+const sug = reactive<{ negative: any[]; positive: any[] }>({ negative: [], positive: [] })
+const sugLoading = ref(false)
+
+async function fetchSuggestions() {
+  sugLoading.value = true
+  try {
+    const res: any = await request.get('/ai-vision/samples/suggestions', { params: { limit: 8 } })
+    sug.negative = res.negative || []
+    sug.positive = res.positive || []
+  } catch {
+    sug.negative = []
+    sug.positive = []
+  } finally {
+    sugLoading.value = false
+  }
+}
+
+/** 告警一键转样本：asNegative=1 转负样本（skipped 背景图），0 转正样本 */
+async function toSample(a: any, asNegative: number) {
+  try {
+    const res: any = await request.post(`/ai-vision/alarms/${a.alarm_id}/to-sample?as_negative=${asNegative}`)
+    ElMessage.success(res?.msg || (asNegative ? '已转负样本' : '已转样本'))
+    sug.negative = sug.negative.filter((x) => x.alarm_id !== a.alarm_id)
+    sug.positive = sug.positive.filter((x) => x.alarm_id !== a.alarm_id)
+    fetchList()
+  } catch {
+    // handled
+  }
+}
+
+/** 样本卡"跳过"= 标记为负样本（背景图） */
+async function markSkipped(s: any) {
+  try {
+    await ElMessageBox.confirm(
+      '标记为"跳过"表示这张图里没有需要检测的目标（或不该报警）。开启背景负样本训练后，它会作为背景图参与训练，帮助模型压误报。',
+      '标记为负样本',
+      { type: 'info', confirmButtonText: '跳过', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  try {
+    await request.put(`/ai-vision/samples/${s.id}/status`, { label_status: 'skipped' })
+    ElMessage.success('已标记为负样本')
+    fetchList()
+  } catch {
+    // handled
+  }
+}
+
+/** 取消跳过：按"有无有效标注框"恢复原状态——直接写 unlabeled 会让
+ *  原本已标注的样本带着框退出训练筛选（labeled-only），永远不再参训（自查 P1-2） */
+async function unmarkSkipped(s: any) {
+  let boxes: any[] = []
+  try {
+    boxes = (JSON.parse(s.label_data || '{}').boxes || []).filter((b: any) => b && b.class_name)
+  } catch {
+    boxes = []
+  }
+  try {
+    await request.put(`/ai-vision/samples/${s.id}/status`, { label_status: boxes.length ? 'labeled' : 'unlabeled' })
+    ElMessage.success(boxes.length ? '已恢复为已标注' : '已恢复为未标注')
+    fetchList()
+  } catch {
+    // handled
+  }
 }
 
 // ── 批量选择 / 批量操作 ─────────────────────────────
@@ -489,6 +630,7 @@ const labelSample = ref<any>(null)
 const labelBoxes = ref<any[]>([])
 const labelClass = ref('')
 const selectedBox = ref(-1)
+const hoverBox = ref(-1)
 const labelCanvasRef = ref<HTMLCanvasElement | null>(null)
 const canvasBoxRef = ref<HTMLElement | null>(null)
 let labelImg: HTMLImageElement | null = null
@@ -505,6 +647,8 @@ function openLabel(s: any) {
     labelBoxes.value = []
   }
   selectedBox.value = -1
+  hoverBox.value = -1
+  undoStack.value = []
   labelVisible.value = true
   nextTick(() => loadLabelImage(s.image_url))
 }
@@ -517,6 +661,7 @@ function onLabelClosed() {
 
 /** 列表里改某个框的类别 → 画布同步重绘（v-model 已改 b.class_name） */
 function onBoxClassChange(b: any) {
+  snapshot()
   // 人工改过类别即视为人工确认框：去掉 AI 角标（保存后也不再被批量AI标注覆盖）
   delete b.conf
   drawCanvas()
@@ -554,15 +699,21 @@ function drawCanvas() {
   labelBoxes.value.forEach((b, i) => {
     const [x0, y0, x1, y1] = yoloToPx(b)
     const sel = i === selectedBox.value
+    const hov = i === hoverBox.value
     const color = sel ? '#ff4d4f' : (b.conf != null ? '#e6a23c' : '#22c55e')
     ctx.setLineDash(!sel && b.conf != null ? [6, 3] : [])
     ctx.strokeStyle = 'rgba(0, 0, 0, 0.85)'
-    ctx.lineWidth = sel ? 5 : 4
+    ctx.lineWidth = sel ? 5 : hov ? 4.5 : 4
     ctx.strokeRect(x0, y0, x1 - x0, y1 - y0)
     ctx.strokeStyle = color
-    ctx.lineWidth = sel ? 3 : 2
+    ctx.lineWidth = sel ? 3 : hov ? 2.5 : 2
     ctx.strokeRect(x0, y0, x1 - x0, y1 - y0)
     ctx.setLineDash([])
+    // hover（未选中）加半透明填充，列表↔画布联动更醒目
+    if (hov && !sel) {
+      ctx.fillStyle = 'rgba(255, 77, 79, 0.12)'
+      ctx.fillRect(x0, y0, x1 - x0, y1 - y0)
+    }
     // 标签底色块：黑底白字，不再用彩字直接叠在画面上
     const text = categoryName(b.class_name) + (b.conf != null ? ` AI${(b.conf * 100).toFixed(0)}%` : '')
     ctx.font = 'bold 12px sans-serif'
@@ -572,9 +723,19 @@ function drawCanvas() {
     ctx.fillRect(x0, ty, tw + 8, 15)
     ctx.fillStyle = color
     ctx.fillText(text, x0 + 4, ty + 11)
+    // 选中框：四角白色拉伸把手
+    if (sel) {
+      ctx.fillStyle = '#fff'
+      ctx.strokeStyle = '#ff4d4f'
+      ctx.lineWidth = 1.5
+      for (const [hx, hy] of [[x0, y0], [x1, y0], [x0, y1], [x1, y1]]) {
+        ctx.fillRect(hx - 4, hy - 4, 8, 8)
+        ctx.strokeRect(hx - 4, hy - 4, 8, 8)
+      }
+    }
   })
-  // 拖拽中的框
-  if (dragStart && dragCur) {
+  // 拖拽中的新框
+  if (dragMode === 'new' && dragStart && dragCur) {
     ctx.setLineDash([5, 3])
     ctx.strokeStyle = 'rgba(0, 0, 0, 0.85)'
     ctx.lineWidth = 4
@@ -600,59 +761,199 @@ function canvasPos(e: MouseEvent) {
   return { x: e.clientX - r.left, y: e.clientY - r.top }
 }
 
-function onCanvasDown(e: MouseEvent) {
-  const p = canvasPos(e)
-  // 命中已有框 → 选中（从后往前，后画的在上层）
+// ── 撤销栈：几何改动/删除/新增/清空/接受AI 前压快照（上限 50 步）──
+const undoStack = ref<string[]>([])
+function snapshot() {
+  undoStack.value.push(JSON.stringify(labelBoxes.value))
+  if (undoStack.value.length > 50) undoStack.value.shift()
+}
+function undo() {
+  const s = undoStack.value.pop()
+  if (s == null) {
+    ElMessage.info('没有可撤销的操作')
+    return
+  }
+  labelBoxes.value = JSON.parse(s)
+  if (selectedBox.value >= labelBoxes.value.length) selectedBox.value = -1
+  drawCanvas()
+}
+
+/** 像素框 → 归一化写回（clamp 到图内，最小 0.005） */
+function pxToBox(b: any, x0: number, y0: number, x1: number, y1: number) {
+  const cv = labelCanvasRef.value!
+  let nx0 = Math.max(0, Math.min(x0, x1)) / cv.width
+  let nx1 = Math.min(1, Math.max(x0, x1)) / cv.width
+  let ny0 = Math.max(0, Math.min(y0, y1)) / cv.height
+  let ny1 = Math.min(1, Math.max(y0, y1)) / cv.height
+  if (nx1 - nx0 < 0.005) { const c = (nx0 + nx1) / 2; nx0 = Math.max(0, c - 0.0025); nx1 = Math.min(1, c + 0.0025) }
+  if (ny1 - ny0 < 0.005) { const c = (ny0 + ny1) / 2; ny0 = Math.max(0, c - 0.0025); ny1 = Math.min(1, c + 0.0025) }
+  b.x = +((nx0 + nx1) / 2).toFixed(4)
+  b.y = +((ny0 + ny1) / 2).toFixed(4)
+  b.w = +(nx1 - nx0).toFixed(4)
+  b.h = +(ny1 - ny0).toFixed(4)
+}
+
+/** 命中检测：优先选中框的四角把手（±6px），再框体（从上层往下） */
+function hitTest(p: { x: number; y: number }): { mode: 'resize' | 'move' | 'new'; idx: number; corner: number; ox: number; oy: number } {
+  if (selectedBox.value >= 0) {
+    const [x0, y0, x1, y1] = yoloToPx(labelBoxes.value[selectedBox.value])
+    const corners = [[x0, y0], [x1, y0], [x0, y1], [x1, y1]]
+    for (let c = 0; c < 4; c++) {
+      if (Math.abs(p.x - corners[c][0]) <= 6 && Math.abs(p.y - corners[c][1]) <= 6) {
+        return { mode: 'resize', idx: selectedBox.value, corner: c, ox: 0, oy: 0 }
+      }
+    }
+  }
   for (let i = labelBoxes.value.length - 1; i >= 0; i--) {
     const [x0, y0, x1, y1] = yoloToPx(labelBoxes.value[i])
     if (p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1) {
-      selectedBox.value = i
-      drawCanvas()
-      return
+      return { mode: 'move', idx: i, corner: -1, ox: p.x - x0, oy: p.y - y0 }
     }
   }
-  selectedBox.value = -1
-  dragStart = p
-  dragCur = p
+  return { mode: 'new', idx: -1, corner: -1, ox: 0, oy: 0 }
 }
 
-function onCanvasMove(e: MouseEvent) {
-  if (!dragStart) return
-  dragCur = canvasPos(e)
-  drawCanvas()
-}
+let dragMode: 'new' | 'move' | 'resize' = 'new'
+let dragIdx = -1
+let dragCorner = -1
+let dragOX = 0
+let dragOY = 0
+let dragOrigBox: any = null // move/resize 起始快照（相对位移用）
 
-function onCanvasUp() {
-  if (!dragStart || !dragCur) { dragStart = null; dragCur = null; return }
-  const cv = labelCanvasRef.value!
-  const x0 = Math.min(dragStart.x, dragCur.x) / cv.width
-  const x1 = Math.max(dragStart.x, dragCur.x) / cv.width
-  const y0 = Math.min(dragStart.y, dragCur.y) / cv.height
-  const y1 = Math.max(dragStart.y, dragCur.y) / cv.height
-  dragStart = null
-  dragCur = null
-  // 过小的拖拽视为误触
-  if (x1 - x0 < 0.01 || y1 - y0 < 0.01) { drawCanvas(); return }
-  if (!labelClass.value) {
-    ElMessage.warning('请先选择新框类别')
+function onCanvasDown(e: MouseEvent) {
+  const p = canvasPos(e)
+  const hit = hitTest(p)
+  dragMode = hit.mode
+  if (hit.mode === 'new') {
+    selectedBox.value = -1
+    dragStart = p
+    dragCur = p
     drawCanvas()
     return
   }
-  labelBoxes.value.push({
-    class_name: labelClass.value,
-    x: +((x0 + x1) / 2).toFixed(4),
-    y: +((y0 + y1) / 2).toFixed(4),
-    w: +(x1 - x0).toFixed(4),
-    h: +(y1 - y0).toFixed(4),
-  })
-  selectedBox.value = labelBoxes.value.length - 1
+  // 操作已有框：先选中 + 压撤销快照 + 记起始几何
+  selectedBox.value = hit.idx
+  snapshot()
+  dragIdx = hit.idx
+  dragCorner = hit.corner
+  dragOX = hit.ox
+  dragOY = hit.oy
+  const b = labelBoxes.value[hit.idx]
+  const [x0, y0, x1, y1] = yoloToPx(b)
+  dragOrigBox = { x0, y0, x1, y1 }
+  dragStart = p
+  dragCur = p
+  updateCursor(p)
+}
+
+function onCanvasMove(e: MouseEvent) {
+  const p = canvasPos(e)
+  if (!dragStart) {
+    hoverBox.value = hitTest(p).idx >= 0 ? hitTest(p).idx : -1
+    updateCursor(p)
+    drawCanvas()
+    return
+  }
+  dragCur = p
+  if (dragMode === 'move' && dragIdx >= 0) {
+    const b = labelBoxes.value[dragIdx]
+    const cv = labelCanvasRef.value!
+    const dx = p.x - dragStart.x
+    const dy = p.y - dragStart.y
+    pxToBox(b, dragOrigBox.x0 + dx, dragOrigBox.y0 + dy, dragOrigBox.x1 + dx, dragOrigBox.y1 + dy)
+    drawCanvas()
+  } else if (dragMode === 'resize' && dragIdx >= 0) {
+    const b = labelBoxes.value[dragIdx]
+    const [x0, y0, x1, y1] = dragOrigBox
+    const fixed = [[x1, y1], [x0, y1], [x1, y0], [x0, y0]][dragCorner] // 对角为锚点
+    pxToBox(b, fixed[0], fixed[1], p.x, p.y)
+    drawCanvas()
+  } else {
+    drawCanvas()
+  }
+}
+
+function onCanvasUp() {
+  if (!dragStart) return
+  if (dragMode === 'new') {
+    const cv = labelCanvasRef.value!
+    const x0 = Math.min(dragStart.x, dragCur!.x) / cv.width
+    const x1 = Math.max(dragStart.x, dragCur!.x) / cv.width
+    const y0 = Math.min(dragStart.y, dragCur!.y) / cv.height
+    const y1 = Math.max(dragStart.y, dragCur!.y) / cv.height
+    dragStart = null
+    dragCur = null
+    // 过小的拖拽视为误触
+    if (x1 - x0 < 0.01 || y1 - y0 < 0.01) { drawCanvas(); return }
+    if (!labelClass.value) {
+      ElMessage.warning('请先选择新框类别')
+      drawCanvas()
+      return
+    }
+    snapshot()
+    labelBoxes.value.push({
+      class_name: labelClass.value,
+      x: +((x0 + x1) / 2).toFixed(4),
+      y: +((y0 + y1) / 2).toFixed(4),
+      w: +(x1 - x0).toFixed(4),
+      h: +(y1 - y0).toFixed(4),
+    })
+    selectedBox.value = labelBoxes.value.length - 1
+  }
+  dragStart = null
+  dragCur = null
+  dragIdx = -1
+  dragCorner = -1
+  dragOrigBox = null
   drawCanvas()
+}
+
+function updateCursor(p: { x: number; y: number }) {
+  const cv = labelCanvasRef.value
+  if (!cv) return
+  const hit = hitTest(p)
+  if (hit.mode === 'resize') cv.style.cursor = hit.corner < 2 ? 'nwse-resize' : 'nesw-resize'
+  else if (hit.mode === 'move') cv.style.cursor = 'move'
+  else cv.style.cursor = 'crosshair'
+}
+
+/** 列表 → 画布 hover 联动 */
+function onListHover(i: number) {
+  hoverBox.value = i
+  drawCanvas()
+}
+
+/** 一键接受全部 AI 框（去 conf 标记 → 转人工框，受批量AI标注保护） */
+function acceptAllAiBoxes() {
+  const n = labelBoxes.value.filter((b) => b.conf != null).length
+  if (!n) {
+    ElMessage.info('没有待确认的 AI 框')
+    return
+  }
+  snapshot()
+  labelBoxes.value.forEach((b) => delete b.conf)
+  drawCanvas()
+  ElMessage.success(`已接受 ${n} 个 AI 框为人工标注`)
 }
 
 function onLabelKey(e: KeyboardEvent) {
   if (!labelVisible.value) return
+  // 输入框内打字不拦截
+  const tag = (e.target as HTMLElement)?.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+    e.preventDefault()
+    undo()
+    return
+  }
   if ((e.key === 'Delete' || e.key === 'Backspace') && selectedBox.value >= 0) {
+    snapshot()
     labelBoxes.value.splice(selectedBox.value, 1)
+    selectedBox.value = -1
+    drawCanvas()
+  }
+  // Esc 取消选中
+  if (e.key === 'Escape' && selectedBox.value >= 0) {
     selectedBox.value = -1
     drawCanvas()
   }
@@ -719,6 +1020,7 @@ onMounted(() => {
   fetchList()
   fetchCategories()
   fetchModels()
+  fetchSuggestions()
   window.addEventListener('keydown', onLabelKey)
   window.addEventListener('resize', () => { if (labelVisible.value) { fitCanvas(); drawCanvas() } })
 })
@@ -730,6 +1032,17 @@ onMounted(() => {
 .page-header h2 { margin: 0 0 4px; font-size: 20px; }
 .page-header .text-muted { color: #999; font-size: 13px; margin: 0; }
 .filter-bar { margin-bottom: 12px; }
+.sug-card { margin-bottom: 12px; border-color: var(--el-color-warning-light-5, #f3d19e); }
+.sug-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.sug-title { font-size: 14px; font-weight: 600; }
+.sug-tip { font-size: 12px; color: #909399; }
+.sug-body { display: flex; flex-wrap: wrap; gap: 12px; }
+.sug-item {
+  display: flex; align-items: center; gap: 8px;
+  border: 1px solid var(--el-border-color-lighter, #ebeef5); border-radius: 8px; padding: 6px 10px 6px 6px;
+}
+.sug-thumb { width: 72px; height: 44px; border-radius: 4px; flex-shrink: 0; }
+.sug-meta { display: flex; flex-direction: column; gap: 2px; min-width: 110px; }
 .batch-bar {
   margin-bottom: 12px; display: flex; align-items: center; gap: 10px;
   padding: 8px 12px; background: var(--el-color-primary-light-9, #ecf5ff);
@@ -795,16 +1108,26 @@ onMounted(() => {
   flex: 1; min-width: 0; background: #1e1e1e; border-radius: 6px;
   display: flex; align-items: center; justify-content: center; overflow: hidden;
 }
-.label-side { width: 240px; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; }
-.label-ai-row { display: flex; gap: 6px; margin-bottom: 4px; }
+.label-side { width: 250px; flex-shrink: 0; display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+.ls-group {
+  background: var(--el-fill-color-lighter, #fafafa);
+  border: 1px solid var(--el-border-color-lighter, #ebeef5);
+  border-radius: 8px; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.ls-group-title { font-size: 12px; font-weight: 600; color: #909399; letter-spacing: 0.5px; }
+.ls-help { line-height: 1.5; }
+.ls-grow { flex: 1; min-height: 120px; }
+.ls-actions { flex-direction: row; align-items: center; background: transparent; border: none; padding: 0; }
+.label-ai-row { display: flex; gap: 6px; }
 .label-box-list {
-  flex: 1; max-height: 300px; overflow-y: auto;
-  border: 1px solid var(--el-border-color-lighter, #ebeef5); border-radius: 4px; padding: 6px;
+  flex: 1; min-height: 0; overflow-y: auto;
+  background: var(--el-bg-color, #fff);
+  border: 1px solid var(--el-border-color-lighter, #ebeef5); border-radius: 6px; padding: 4px;
 }
 .label-box-item {
   display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 4px; cursor: pointer;
 }
 .label-box-item:hover { background: var(--el-fill-color-light, #f5f7fa); }
 .label-box-item.active { background: var(--el-color-danger-light-9, #fef0f0); }
-.label-actions { display: flex; justify-content: flex-end; gap: 8px; }
 </style>

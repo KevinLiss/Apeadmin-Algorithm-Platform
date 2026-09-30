@@ -23,6 +23,7 @@
     <el-card shadow="never" class="form-card">
       <template #header>发起训练</template>
       <el-form :inline="false" label-width="110px">
+        <div class="form-section-title"><span class="fst-dot"></span>数据选择</div>
         <el-form-item label="基座模型">
           <el-select v-model="form.base_model_id" placeholder="选择可续训的模型（须已登记 .pt）" style="width: 340px" @change="onBaseChange">
             <el-option
@@ -61,6 +62,7 @@
           </template>
           <el-text size="small" type="info" style="margin-left: 10px">训练只取范围内"已标注且框类别命中"的样本</el-text>
         </el-form-item>
+        <div class="form-section-title"><span class="fst-dot"></span>训练参数</div>
         <el-row :gutter="16">
           <el-col :span="6">
             <el-form-item label="轮数 epochs">
@@ -87,6 +89,14 @@
             </el-form-item>
           </el-col>
         </el-row>
+        <el-form-item label="背景负样本">
+          <div style="display: flex; align-items: center; gap: 10px">
+            <el-slider v-model="form.bg_ratio" :min="0" :max="0.3" :step="0.05" style="width: 200px" :format-tooltip="(v: number) => `${(v * 100).toFixed(0)}%`" />
+            <el-text size="small" type="info">
+              {{ form.bg_ratio > 0 ? `按正样本 ${(form.bg_ratio * 100).toFixed(0)}% 混入「跳过」图作背景压误报（当前候选 ${preview?.bg_candidates ?? 0} 张）` : '不启用（误报图不参与，模型可能偏敏感）' }}
+            </el-text>
+          </div>
+        </el-form-item>
         <el-form-item label="产物名称">
           <el-input v-model="form.output_name" placeholder="训练完成入库的模型名（留空=自动 基座名-ftN）" style="width: 340px" maxlength="60" />
         </el-form-item>
@@ -100,6 +110,19 @@
             <el-button v-if="preview.sample_ids?.length" link type="primary" size="small" @click="viewTrainSamples">
               查看这些图片
             </el-button>
+          </el-alert>
+          <!-- 类别不平衡预警：0 框=该类学不到；<5 框=极易漏检 -->
+          <el-alert
+            v-if="preview && imbalance.length"
+            :closable="false"
+            :type="imbalance.some((x) => x.count === 0) ? 'error' : 'warning'"
+            style="margin-bottom: 10px"
+          >
+            <div v-for="x in imbalance" :key="x.code" style="font-size: 13px; line-height: 1.7">
+              「{{ categoryName(x.code) }}」{{ x.count === 0 ? '没有任何标注框——模型学不到这一类，训练必然漏检' : `只有 ${x.count} 个框（建议 ≥30）` }}。
+              去<el-link type="primary" :underline="false" @click="goSamples">样本库</el-link>补标注后再训。
+            </div>
+            <div v-if="epochsHint" style="font-size: 13px; margin-top: 2px">{{ epochsHint }}</div>
           </el-alert>
           <el-button type="primary" :loading="creating" :disabled="!canCreate" @click="handleCreate" v-permission="'ai_vision:train:create'">
             开始训练
@@ -161,9 +184,12 @@
         <el-table-column label="开始时间" width="170">
           <template #default="{ row }">{{ formatDateTime(row.started_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="190" fixed="right">
+        <el-table-column label="操作" width="230" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="openLog(row)">日志</el-button>
+            <el-button link type="primary" size="small" :disabled="!hasProgress(row)" @click="openCurve(row)">曲线</el-button>
+            <el-button link type="primary" size="small" @click="openSnapshot(row)">快照</el-button>
+            <el-button link type="primary" size="small" @click="reproduce(row)">复现</el-button>
             <el-button link type="danger" size="small" @click="handleCancel(row)" v-if="row.status === 'running'" v-permission="'ai_vision:train:control'">取消</el-button>
             <el-button link type="danger" size="small" @click="handleDeleteJob(row)" v-else v-permission="'ai_vision:train:control'">删除</el-button>
           </template>
@@ -250,6 +276,47 @@
       <pre class="log-pre">{{ logLines.join('\n') || '（暂无日志）' }}</pre>
     </el-dialog>
 
+    <!-- 训练曲线弹窗（loss / mAP 双轴，运行中动态刷新；可放大） -->
+    <el-dialog v-model="curveVisible" :fullscreen="curveFull" :title="`训练曲线 · 任务 #${curveJobId}`" width="860px" @closed="stopCurvePoll">
+      <template #header>
+        <div style="display: flex; align-items: center; justify-content: space-between; padding-right: 32px">
+          <span>训练曲线 · 任务 #{{ curveJobId }}</span>
+          <el-button link type="primary" size="small" @click="toggleCurveFull">{{ curveFull ? '还原' : '放大' }}</el-button>
+        </div>
+      </template>
+      <div ref="curveEl" :style="{ width: '100%', height: curveFull ? 'calc(100vh - 150px)' : '520px' }"></div>
+      <el-text size="small" type="info" style="display: block; margin-top: 8px">
+        box/cls loss 越低越好（左轴），mAP50 越高越好（右轴）；loss 不降或 mAP 长期为 0 通常意味着样本太少/类别不平衡/学习率不当
+      </el-text>
+    </el-dialog>
+
+    <!-- 样本快照弹窗（数据集版本视图：当初用了哪些图，已删除的灰显） -->
+    <el-dialog v-model="snapVisible" :title="`样本快照 · 任务 #${snapJobId}`" width="920px" top="5vh">
+      <div class="picker-tip">
+        <el-text size="small" type="info">
+          本次训练使用 {{ snapTotal }} 张样本，其中 {{ snapPresent }} 张仍在样本库
+          <template v-if="snapTotal - snapPresent > 0">（{{ snapTotal - snapPresent }} 张已删除，复现时将自动跳过）</template>
+        </el-text>
+      </div>
+      <div class="picker-grid">
+        <div v-for="s in snapItems" :key="s.id" class="picker-card" :class="{ missing: s.missing }">
+          <div class="picker-img" :style="{ aspectRatio: '16 / 9' }">
+            <template v-if="!s.missing">
+              <el-image :src="imageUrl(s.file_path)" fit="fill" lazy :preview-src-list="[imageUrl(s.file_path)]" preview-teleported />
+              <div v-for="(b, bi) in parseBoxes(s)" :key="bi" class="ov-box" :style="{
+                left: `${(b.x - b.w / 2) * 100}%`, top: `${(b.y - b.h / 2) * 100}%`,
+                width: `${b.w * 100}%`, height: `${b.h * 100}%`,
+              }" />
+            </template>
+            <div v-else class="snap-missing"><el-text size="small" type="info">样本 #{{ s.id }} 已删除</el-text></div>
+          </div>
+          <div class="picker-meta">
+            <el-text size="small">#{{ s.id }}<template v-if="!s.missing"> · {{ parseBoxes(s).length }} 框</template></el-text>
+          </div>
+        </div>
+      </div>
+    </el-dialog>
+
     <!-- 手动勾选样本弹窗（仅列已标注样本，卡片带标注框预览） -->
     <el-dialog v-model="pickerVisible" title="勾选训练样本（仅显示已标注）" width="920px" top="5vh">
       <div class="picker-tip">
@@ -305,7 +372,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import * as echarts from 'echarts'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Select, Refresh, InfoFilled } from '@element-plus/icons-vue'
 import request from '@/api/request'
@@ -335,6 +403,7 @@ const form = reactive({
   imgsz: 416,
   batch: 4,
   lr0: 0.01,
+  bg_ratio: 0,
   note: '',
 })
 
@@ -441,6 +510,27 @@ const baseNames = computed<string[]>(() => {
 const trainableModels = computed(() => models.value.filter((m) => m.pt_path || m.source === 'trained'))
 // 与后端 create_train_job 门槛一致：≥5 张（8:2 划分后训练集 ≥4）
 const canCreate = computed(() => !!form.base_model_id && form.category_codes.length > 0 && (preview.value?.samples ?? 0) >= 5)
+
+/** 类别不平衡清单：训练类别里框数 <5 的（含 0）；0 框为致命 */
+const imbalance = computed(() => {
+  const pc = preview.value?.per_class || {}
+  return form.category_codes
+    .map((code) => ({ code, count: pc[code] ?? 0 }))
+    .filter((x) => x.count < 5)
+})
+
+/** 推荐轮数提示：样本多时给个参考区间 */
+const epochsHint = computed(() => {
+  const n = preview.value?.samples ?? 0
+  if (n < 5 || imbalance.value.some((x) => x.count === 0)) return ''
+  if (n < 20) return '样本较少，建议 30~50 轮即可（过多轮数在小样本上过拟合）。'
+  if (n < 100) return '当前样本量建议 50~100 轮。'
+  return '样本充足，可试 100~200 轮，关注曲线 mAP 是否收敛。'
+})
+
+function goSamples() {
+  activeTab.value = 'samples'
+}
 
 function categoryName(code: string) {
   return categories.value.find((c) => c.code === code)?.name || code
@@ -565,6 +655,141 @@ async function openLog(row: any) {
   await load()
   if (logTimer) window.clearInterval(logTimer)
   logTimer = window.setInterval(load, 3000)
+}
+
+// ═══ 训练曲线（progress.jsonl → ECharts 双轴）═══
+const curveVisible = ref(false)
+const curveFull = ref(false)
+const curveJobId = ref<number | null>(null)
+const curveEl = ref<HTMLElement | null>(null)
+let curveChart: echarts.ECharts | null = null
+let curveTimer: number | null = null
+
+/** 放大/还原：等 dialog 过渡动画结束后 resize 图表适配新容器高 */
+function toggleCurveFull() {
+  curveFull.value = !curveFull.value
+  setTimeout(() => curveChart?.resize(), 320)
+}
+
+function hasProgress(row: any) {
+  return (row.status === 'running' || row.status === 'completed') && (row.progress ?? 0) > 0
+}
+
+async function fetchCurveRecords(): Promise<any[]> {
+  if (!curveJobId.value) return []
+  try {
+    const res: any = await request.get(`/ai-vision/train-jobs/${curveJobId.value}/progress`)
+    return res.records || []
+  } catch {
+    return []
+  }
+}
+
+async function renderCurve() {
+  const recs = await fetchCurveRecords()
+  if (!curveEl.value) return
+  if (!curveChart) curveChart = echarts.init(curveEl.value)
+  const eps = recs.map((r) => r.epoch)
+  curveChart.setOption({
+    tooltip: { trigger: 'axis' },
+    legend: { data: ['box_loss', 'cls_loss', 'mAP50'] },
+    grid: { left: 50, right: 56, top: 36, bottom: 30 },
+    xAxis: { type: 'category', name: 'epoch', data: eps },
+    yAxis: [
+      { type: 'value', name: 'loss' },
+      { type: 'value', name: 'mAP50', min: 0, max: 1, splitLine: { show: false } },
+    ],
+    series: [
+      { name: 'box_loss', type: 'line', smooth: true, data: recs.map((r) => r.box_loss), itemStyle: { color: '#e6a23c' } },
+      { name: 'cls_loss', type: 'line', smooth: true, data: recs.map((r) => r.cls_loss), itemStyle: { color: '#f56c6c' } },
+      { name: 'mAP50', type: 'line', smooth: true, yAxisIndex: 1, data: recs.map((r) => r.mAP50), itemStyle: { color: '#409eff' }, areaStyle: { opacity: 0.08 } },
+    ],
+  })
+}
+
+async function openCurve(row: any) {
+  curveJobId.value = row.id
+  curveFull.value = false
+  curveVisible.value = true
+  await nextTick()
+  await renderCurve()
+  if (curveTimer) window.clearInterval(curveTimer)
+  // 运行中任务曲线 5s 动态增长；已结束任务一次绘制即可
+  if (row.status === 'running') curveTimer = window.setInterval(renderCurve, 5000)
+}
+
+function stopCurvePoll() {
+  if (curveTimer) { window.clearInterval(curveTimer); curveTimer = null }
+  if (curveChart) { curveChart.dispose(); curveChart = null }
+}
+
+// ═══ 样本快照（数据集版本视图）+ 复现训练 ═══
+const snapVisible = ref(false)
+const snapJobId = ref<number | null>(null)
+const snapItems = ref<any[]>([])
+const snapTotal = ref(0)
+const snapPresent = ref(0)
+
+async function openSnapshot(row: any) {
+  snapJobId.value = row.id
+  snapItems.value = []
+  snapTotal.value = row.sample_ids?.length ?? 0
+  snapPresent.value = 0
+  snapVisible.value = true
+  try {
+    const res: any = await request.get(`/ai-vision/train-jobs/${row.id}/samples`)
+    snapItems.value = res.items || []
+    snapTotal.value = res.total ?? snapItems.value.length
+    snapPresent.value = res.present ?? 0
+  } catch {
+    // handled
+  }
+}
+
+/** 复现：把该任务的参数/样本范围预填回发起表单（样本快照里已删除的自动剔除） */
+async function reproduce(row: any) {
+  const p = row.params || {}
+  form.base_model_id = row.base_model_id
+  form.epochs = p.epochs ?? 30
+  form.imgsz = p.imgsz ?? 416
+  form.batch = p.batch ?? 4
+  form.lr0 = p.lr0 ?? 0.01
+  form.bg_ratio = p.bg_ratio ?? 0
+  form.note = p.note ? `${p.note}（复现 #${row.id}）` : `复现任务 #${row.id}`
+  form.output_name = ''
+  // 类别：优先 params.category_codes（新任务有存），否则从基座类别表推
+  if (p.category_codes?.length) {
+    form.category_codes = [...p.category_codes]
+  } else if (row.base_model_id) {
+    const m = models.value.find((x) => x.id === row.base_model_id)
+    try {
+      const map = JSON.parse(m?.category_map || '{}')
+      form.category_codes = Object.keys(map).sort((a, b) => Number(a) - Number(b)).map((k) => map[k])
+    } catch {
+      form.category_codes = []
+    }
+  }
+  // 样本范围：手动快照 → 剔除已删除后仍按"手动勾选"复现；否则回退全库/分组
+  let ids: number[] = row.sample_ids || []
+  if (ids.length) {
+    try {
+      const res: any = await request.get(`/ai-vision/train-jobs/${row.id}/samples`)
+      ids = (res.items || []).filter((s: any) => !s.missing).map((s: any) => s.id)
+    } catch {
+      // 查询失败则用原快照（后端会按框内容再筛）
+    }
+  }
+  if (ids.length) {
+    scopeMode.value = 'manual'
+    pickedIds.value = ids
+  } else {
+    scopeMode.value = p.folder ? 'folder' : 'all'
+    form.folder = p.folder || ''
+    pickedIds.value = []
+  }
+  activeTab.value = 'train'
+  loadPreview()
+  ElMessage.success(`已复现任务 #${row.id} 的参数与样本范围${ids.length ? `（${ids.length} 张有效样本）` : ''}，确认后可再次发起`)
 }
 
 // ═══ 基座档案（.pt + 类别表登记）═══
@@ -706,7 +931,17 @@ onBeforeUnmount(() => {
 .picker-card {
   border: 2px solid #ebeef5; border-radius: 6px; overflow: hidden; cursor: pointer; background: #fff;
 }
+/* 发起表单分区标题 */
+.form-section-title {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; font-weight: 600; color: #606266;
+  margin: 2px 0 14px; padding-bottom: 8px;
+  border-bottom: 1px solid var(--el-border-color-lighter, #ebeef5);
+}
+.fst-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--el-color-primary, #409eff); }
 .picker-card.on { border-color: var(--el-color-success, #67c23a); box-shadow: 0 0 0 2px var(--el-color-success-light-7, #c2e7b0); }
+.picker-card.missing { border-style: dashed; border-color: #dcdfe6; cursor: default; opacity: 0.6; }
+.snap-missing { display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; min-height: 60px; background: #f5f7fa; }
 .picker-img { position: relative; width: 100%; background: #1e1e1e; }
 .picker-img :deep(.el-image), .picker-img img { width: 100%; height: 100%; display: block; }
 .picker-meta { display: flex; align-items: center; justify-content: space-between; padding: 4px 6px; }

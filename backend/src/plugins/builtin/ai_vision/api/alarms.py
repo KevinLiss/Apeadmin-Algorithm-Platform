@@ -169,12 +169,17 @@ async def alarm_to_sample(
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
     _perm: Annotated[User, Depends(_require_perm("ai_vision:alarm:edit"))],
+    as_negative: int = Query(default=0, ge=0, le=1, description="1=转负样本（误报图：skipped 无标注，训练作背景压误报）"),
 ):
     """误报/告警转样本：复制抓拍图到 samples 目录 + 建样本记录。
 
     优先复制**干净原图**（无烧录框，训练可用）并携带告警触发时刻的
     检测框作为初始标注（label_status=labeled，转完即训）；旧告警无
     干净图/框数据时降级复制画框图、状态为未标注（与历史行为一致）。
+
+    as_negative=1（误报转负样本）：不带任何框、状态标 skipped——
+    误报警的 boxes 恰恰是错检框，带上会教错模型；skipped 图在训练
+    bg_ratio>0 时作为背景图混入，专门压制该类误报。
     """
     item = await _get_alarm_or_404(db, alarm_id)
     src_clean = Path(item.clean_snapshot_path) if getattr(item, "clean_snapshot_path", "") else None
@@ -185,7 +190,7 @@ async def alarm_to_sample(
 
     # 解析触发时刻检测框（仅干净图才自动带标注；画框图带框会双重污染）
     boxes: list[dict] = []
-    if src is src_clean and getattr(item, "boxes_json", ""):
+    if as_negative == 0 and src is src_clean and getattr(item, "boxes_json", ""):
         try:
             parsed = json.loads(item.boxes_json)
             if isinstance(parsed, list):
@@ -215,17 +220,22 @@ async def alarm_to_sample(
     sample = AIVisionSample(
         file_path=str(dst),
         source="alarm",
-        label_status="labeled" if boxes else "unlabeled",
-        label_data=json.dumps({"boxes": boxes}, ensure_ascii=False) if boxes else "{}",
+        label_status="skipped" if as_negative else ("labeled" if boxes else "unlabeled"),
+        label_data="{}",
         category_code=item.category_code,
         related_event_id=item.event_id,
         width=width,
         height=height,
     )
+    if boxes:
+        sample.label_data = json.dumps({"boxes": boxes}, ensure_ascii=False)
     db.add(sample)
     await db.commit()
     await db.refresh(sample)
-    msg = f"已转样本（自动携带 {len(boxes)} 个检测框标注）" if boxes else "已转样本"
+    if as_negative:
+        msg = "已转负样本（无标注，训练时作背景图压误报）"
+    else:
+        msg = f"已转样本（自动携带 {len(boxes)} 个检测框标注）" if boxes else "已转样本"
     return success_response(data=_sample_out(sample), msg=msg)
 
 
