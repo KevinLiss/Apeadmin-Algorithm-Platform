@@ -338,3 +338,71 @@ class AIVisionStaff(IDMixin, TimestampMixin, Base):
     )
     photo_count: Mapped[int] = mapped_column(Integer, default=0, comment="登记照片数")
     note: Mapped[str] = mapped_column(String(200), default="", comment="班次/备注")
+
+
+# ---------------------------------------------------------------------------
+# 人脸库（人脸识别）
+# ---------------------------------------------------------------------------
+
+
+class AIVisionFace(IDMixin, TimestampMixin, Base):
+    """人脸库：登记人员的人脸特征档案（1:N 比对用）。
+
+    与 AIVisionStaff（体貌/ReID 外观特征，人岗验证用）相互独立：
+    本表存的是人脸 128 维特征（SFace），按姓名全局唯一（同名覆盖重登记）。
+    group 分组决定比对范围：
+    - whitelist：白名单，stranger 模式据此判"陌生人"
+    - blacklist：黑名单，blacklist 模式命中即告警
+    """
+
+    __tablename__ = "ai_vision_faces"
+
+    name: Mapped[str] = mapped_column(
+        String(50), index=True, comment="姓名（全局唯一，同名覆盖重登记）"
+    )
+    staff_no: Mapped[str] = mapped_column(String(50), default="", comment="工号/编号（可选）")
+    group: Mapped[str] = mapped_column(
+        String(20), default="whitelist", server_default="whitelist",
+        comment="分组：whitelist=白名单 / blacklist=黑名单",
+    )
+    embedding: Mapped[str] = mapped_column(
+        Text, default="[]", comment="JSON: 128 维 L2 归一化人脸特征向量（多张均值）"
+    )
+    photo_path: Mapped[str] = mapped_column(
+        String(500), default="", comment="登记参考照片路径（最近一次）"
+    )
+    photo_count: Mapped[int] = mapped_column(Integer, default=0, comment="登记照片数")
+    note: Mapped[str] = mapped_column(String(200), default="", comment="备注（部门/班次等）")
+
+
+# ---------------------------------------------------------------------------
+# 人脸识别流水（识别记录/考勤）
+# ---------------------------------------------------------------------------
+
+
+class AIVisionFaceLog(IDMixin, TimestampMixin, Base):
+    """人脸识别流水：record 模式下每次识别的记录。
+
+    已知人员记姓名快照；陌生人 person_id=0。供识别记录页查询/考勤统计。
+    同一人的连续出现按事件的 face_record_interval 节流（防每秒一条）。
+    """
+
+    __tablename__ = "ai_vision_face_logs"
+
+    person_id: Mapped[int] = mapped_column(
+        Integer, default=0, index=True, comment="人脸库人员 ID，0=陌生人"
+    )
+    person_name: Mapped[str] = mapped_column(
+        String(50), default="", comment="识别时的姓名快照（陌生人存「陌生人」）"
+    )
+    group: Mapped[str] = mapped_column(
+        String(20), default="", comment="识别时的分组快照（黑名单命中打标）"
+    )
+    camera_id: Mapped[int] = mapped_column(Integer, comment="摄像头 ID")
+    task_id: Mapped[int] = mapped_column(Integer, default=0, comment="任务 ID")
+    similarity: Mapped[float] = mapped_column(
+        Float, default=0.0, comment="余弦相似度（陌生人为库内最高相似度）"
+    )
+    snapshot_path: Mapped[str] = mapped_column(
+        String(500), default="", comment="人脸特写小图路径（原图框裁剪）"
+    )

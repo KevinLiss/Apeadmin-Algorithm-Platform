@@ -140,6 +140,9 @@
                   <el-tag v-if="selectedCamera" size="small" :type="selectedCamera.source_type === 'video' ? 'info' : 'warning'">
                     {{ selectedCamera.source_type === 'video' ? '视频文件' : 'RTSP 实时流' }}
                   </el-tag>
+                  <el-tag v-if="!monitoring && cameraId" size="small" type="info" class="preview-badge">预览中 · 未启动检测</el-tag>
+                  <el-tag v-else-if="monitoring && previewVideo" size="small" type="info" class="preview-badge">原视频回看</el-tag>
+                  <el-tag v-else-if="monitoring" size="small" type="success" class="preview-badge">监控画面</el-tag>
                   <el-button
                     v-if="isVideoSource && videoPlayUrl && monitoring"
                     link
@@ -203,7 +206,21 @@
                 <el-descriptions-item label="类型">{{ selectedCamera ? (selectedCamera.source_type === 'video' ? '视频文件' : 'RTSP 摄像头') : '—' }}</el-descriptions-item>
                 <el-descriptions-item label="位置">{{ selectedCamera?.location || '—' }}</el-descriptions-item>
                 <el-descriptions-item label="监控状态">
-                  <el-tag size="small" :type="monitoring ? 'success' : 'info'">{{ monitoring ? '监控中' : '未启动' }}</el-tag>
+                  <div class="monitor-status-row">
+                    <el-tag
+                      size="small"
+                      :type="monitoring ? 'success' : cameraTasks.length ? 'warning' : 'info'"
+                    >
+                      {{ monitoring ? `监控中 · ${runningCount} 路` : cameraTasks.length ? '已停止' : '未布防' }}
+                    </el-tag>
+                    <template v-if="monitoring">
+                      <el-button link type="danger" size="small" :loading="acting" @click="stopMonitorFromPanel">停止</el-button>
+                    </template>
+                    <template v-else-if="cameraTasks.length">
+                      <el-button link type="primary" size="small" :loading="acting" @click="startMonitorFromPanel">启动监控</el-button>
+                    </template>
+                    <el-text v-else size="small" type="info">该源暂无任务，去「任务管理」新建</el-text>
+                  </div>
                 </el-descriptions-item>
                 <el-descriptions-item label="布防事件">
                   <template v-if="monitorEvents.length">
@@ -262,6 +279,7 @@
                             <el-button v-if="a.status === 'pending'" link type="primary" size="small" @click="handleAck(a)" v-permission="'ai_vision:alarm:edit'">确认</el-button>
                             <el-button link type="warning" size="small" @click="handleFalsePositive(a)" v-permission="'ai_vision:alarm:edit'">误报</el-button>
                             <el-button v-if="a.status !== 'pending'" link type="success" size="small" @click="handleToSample(a)" v-permission="'ai_vision:alarm:edit'">转样本</el-button>
+                            <el-button v-if="a.event_detector === 'face' && a.status !== 'false_positive'" link type="primary" size="small" @click="openRegisterFace(a)" v-permission="'ai_vision:face:create'">转人脸库</el-button>
                           </div>
                         </div>
                       </div>
@@ -285,11 +303,39 @@
         <AlarmsPage :embedded="true" />
       </el-tab-pane>
     </el-tabs>
+
+    <!-- 转人脸库弹窗：实时监控台人脸识别告警 → 人脸库登记 -->
+    <el-dialog v-model="registerFaceVisible" title="转人脸库" width="480px">
+      <el-alert type="info" :closable="false" style="margin-bottom: 12px">
+        从告警 #{{ registerFaceAlarm?.id }} 的干净抓拍图提取人脸特征登记入人脸库；检测不到人脸时会报错。
+      </el-alert>
+      <el-form :model="registerFaceForm" label-width="70px">
+        <el-form-item label="姓名" required>
+          <el-input v-model="registerFaceForm.name" maxlength="50" placeholder="姓名或工号（同名重复登记将覆盖旧档案）" />
+        </el-form-item>
+        <el-form-item label="分组" required>
+          <el-radio-group v-model="registerFaceForm.group">
+            <el-radio-button value="whitelist">白名单</el-radio-button>
+            <el-radio-button value="blacklist">黑名单</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="工号">
+          <el-input v-model="registerFaceForm.staff_no" maxlength="50" placeholder="可选" />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="registerFaceForm.note" maxlength="200" placeholder="如：部门 / 班次" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="registerFaceVisible = false">取消</el-button>
+        <el-button type="primary" :loading="registerFaceSaving" :disabled="!registerFaceForm.name" @click="handleRegisterFace">登记</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '@/api/request'
@@ -346,6 +392,9 @@ const showPreview = computed(() => isVideoSource.value && !!videoPlayUrl.value &
 
 const selectedCamera = computed(() => cameras.value.find((c) => c.id === cameraId.value) || null)
 const monitorEvents = computed(() => events.value.filter((e) => eventIds.value.includes(e.id)))
+// 当前源的全部任务 / 运行中任务数（源信息面板的启停按钮与状态标签用）
+const cameraTasks = computed(() => taskCards.value.filter((t: any) => t.camera_id === cameraId.value))
+const runningCount = computed(() => cameraTasks.value.filter((t: any) => t.status === 'running').length)
 const currentFps = computed(() => {
   const workers = status.value.workers || []
   const w = workers.find((x: any) => x.camera_id === cameraId.value)
@@ -512,6 +561,57 @@ async function startMonitor() {
     await fetchTaskCards()
   } catch (e: any) {
     ElMessage.error(e?.message || '启动失败，请检查事件状态与运行环境')
+  } finally {
+    acting.value = false
+  }
+}
+
+// ── 源信息面板的启停（不看事件预选，直接开/停当前源的全部任务）──
+async function startMonitorFromPanel() {
+  if (!cameraId.value) return
+  acting.value = true
+  try {
+    const res: any = await listTasks({ camera_id: cameraId.value, page: 1, page_size: 100 })
+    const tasks: any[] = res.items || []
+    const stopped = tasks.filter((t) => t.status !== 'running')
+    if (!tasks.length) {
+      ElMessage.warning('该源暂无任务，请先到「任务管理」新建')
+      return
+    }
+    if (!stopped.length) {
+      monitoring.value = true
+      previewVideo.value = false
+      return
+    }
+    for (const t of stopped) {
+      await startTask(t.id)
+    }
+    monitoring.value = true
+    eventIds.value = tasks.map((t) => t.event_id)
+    previewVideo.value = false // 监控画面（带检测框叠加）优先
+    ElMessage.success(`监控已启动（${stopped.length} 路事件分析）`)
+    await fetchTaskCards()
+  } catch (e: any) {
+    ElMessage.error(e?.message || '启动失败，请检查事件状态与运行环境')
+  } finally {
+    acting.value = false
+  }
+}
+
+async function stopMonitorFromPanel() {
+  if (!cameraId.value) return
+  acting.value = true
+  try {
+    const res: any = await listTasks({ camera_id: cameraId.value, status: 'running', page: 1, page_size: 100 })
+    const running: any[] = res.items || []
+    for (const t of running) {
+      await stopTask(t.id)
+    }
+    monitoring.value = false
+    ElMessage.info(running.length ? `监控已停止（${running.length} 路）` : '监控已停止')
+    await fetchTaskCards()
+  } catch (e: any) {
+    ElMessage.error(e?.message || '停止失败')
   } finally {
     acting.value = false
   }
@@ -794,6 +894,44 @@ async function handleToSample(a: any) {
   }
 }
 
+// ── 转人脸库（人脸识别告警 → 人脸库登记）────────────────────
+const registerFaceVisible = ref(false)
+const registerFaceSaving = ref(false)
+const registerFaceAlarm = ref<any>(null)
+const registerFaceForm = reactive({ name: '', group: 'whitelist', staff_no: '', note: '' })
+
+function openRegisterFace(a: any) {
+  registerFaceAlarm.value = a
+  registerFaceForm.name = ''
+  registerFaceForm.group = 'whitelist'
+  registerFaceForm.staff_no = ''
+  registerFaceForm.note = ''
+  registerFaceVisible.value = true
+}
+
+async function handleRegisterFace() {
+  if (!registerFaceForm.name || !registerFaceAlarm.value) return
+  registerFaceSaving.value = true
+  try {
+    const form = new FormData()
+    form.append('alarm_id', String(registerFaceAlarm.value.id))
+    form.append('name', registerFaceForm.name)
+    form.append('group', registerFaceForm.group)
+    form.append('staff_no', registerFaceForm.staff_no)
+    form.append('note', registerFaceForm.note)
+    const res: any = await request.post('/ai-vision/faces/register-from-alarm', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 120000,
+    })
+    ElMessage.success(res?.msg || '已登记到人脸库')
+    registerFaceVisible.value = false
+  } catch {
+    // handled by interceptor
+  } finally {
+    registerFaceSaving.value = false
+  }
+}
+
 // ── 生命周期 ─────────────────────────────────────────
 function tickClock() {
   clockText.value = new Date().toLocaleString('zh-CN', { hour12: false })
@@ -976,6 +1114,8 @@ onBeforeUnmount(() => {
 .info-card { margin-bottom: 16px; }
 .event-tag { margin: 2px 4px 2px 0; }
 .muted { color: #c0c4cc; }
+.monitor-status-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.preview-badge { margin-left: 4px; }
 
 /* 告警时间线（竖向节点式：日期分组 + 逐条节点） */
 .timeline-header { display: flex; align-items: center; gap: 10px; }

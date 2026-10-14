@@ -84,11 +84,15 @@
       <el-table-column label="告警时间" width="170">
         <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="250" fixed="right">
+      <el-table-column label="备注" min-width="140" show-overflow-tooltip>
+        <template #default="{ row }">{{ row.note || '—' }}</template>
+      </el-table-column>
+      <el-table-column label="操作" width="340" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="handleAck(row)" v-if="row.status === 'pending'" v-permission="'ai_vision:alarm:edit'">确认</el-button>
           <el-button link type="warning" size="small" @click="handleFalsePositive(row)" v-if="['pending', 'acknowledged'].includes(row.status)" v-permission="'ai_vision:alarm:edit'">误报</el-button>
           <el-button link type="success" size="small" @click="handleToSample(row)" v-if="row.status === 'false_positive' || row.status === 'acknowledged'" v-permission="'ai_vision:alarm:edit'">转样本</el-button>
+          <el-button link type="primary" size="small" @click="openRegisterFace(row)" v-if="row.event_detector === 'face' && row.status !== 'false_positive'" v-permission="'ai_vision:face:create'">转人脸库</el-button>
           <el-button link type="danger" size="small" @click="handleDelete(row)" v-permission="'ai_vision:alarm:edit'">删除</el-button>
         </template>
       </el-table-column>
@@ -114,6 +118,34 @@
         @current-change="fetchList"
       />
     </div>
+
+    <!-- 转人脸库弹窗（仅人脸识别事件的告警显示入口）：从抓拍图提取人脸登记 -->
+    <el-dialog v-model="registerFaceVisible" title="转人脸库" width="480px">
+      <el-alert type="info" :closable="false" style="margin-bottom: 12px">
+        从告警 #{{ registerFaceAlarm?.id }} 的干净抓拍图提取人脸特征登记入人脸库；检测不到人脸时会报错。
+      </el-alert>
+      <el-form :model="registerFaceForm" label-width="70px">
+        <el-form-item label="姓名" required>
+          <el-input v-model="registerFaceForm.name" maxlength="50" placeholder="姓名或工号（同名重复登记将覆盖旧档案）" />
+        </el-form-item>
+        <el-form-item label="分组" required>
+          <el-radio-group v-model="registerFaceForm.group">
+            <el-radio-button value="whitelist">白名单</el-radio-button>
+            <el-radio-button value="blacklist">黑名单</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="工号">
+          <el-input v-model="registerFaceForm.staff_no" maxlength="50" placeholder="可选" />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="registerFaceForm.note" maxlength="200" placeholder="如：部门 / 班次" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="registerFaceVisible = false">取消</el-button>
+        <el-button type="primary" :loading="registerFaceSaving" :disabled="!registerFaceForm.name" @click="handleRegisterFace">登记</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -281,6 +313,44 @@ async function handleDelete(row: any) {
   await request.delete(`/ai-vision/alarms/${row.id}`)
   ElMessage.success('已删除')
   await fetchList()
+}
+
+// ── 转人脸库（人脸识别告警 → 人脸库登记）────────────────────
+const registerFaceVisible = ref(false)
+const registerFaceSaving = ref(false)
+const registerFaceAlarm = ref<any>(null)
+const registerFaceForm = reactive({ name: '', group: 'whitelist', staff_no: '', note: '' })
+
+function openRegisterFace(row: any) {
+  registerFaceAlarm.value = row
+  registerFaceForm.name = ''
+  registerFaceForm.group = 'whitelist'
+  registerFaceForm.staff_no = ''
+  registerFaceForm.note = ''
+  registerFaceVisible.value = true
+}
+
+async function handleRegisterFace() {
+  if (!registerFaceForm.name || !registerFaceAlarm.value) return
+  registerFaceSaving.value = true
+  try {
+    const form = new FormData()
+    form.append('alarm_id', String(registerFaceAlarm.value.id))
+    form.append('name', registerFaceForm.name)
+    form.append('group', registerFaceForm.group)
+    form.append('staff_no', registerFaceForm.staff_no)
+    form.append('note', registerFaceForm.note)
+    const res: any = await request.post('/ai-vision/faces/register-from-alarm', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 120000,
+    })
+    ElMessage.success(res?.msg || '已登记到人脸库')
+    registerFaceVisible.value = false
+  } catch {
+    // handled by interceptor
+  } finally {
+    registerFaceSaving.value = false
+  }
 }
 
 async function handleBatchAck() {

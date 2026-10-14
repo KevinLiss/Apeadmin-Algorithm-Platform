@@ -14,6 +14,7 @@
 ``uploads/ai_vision`` 下，已由 ``plugin.register()`` 挂载的 StaticFiles
 （``/api/v1/ai-vision/media``）直接服务，原生支持 HTTP Range（进度条拉拽）。
 """
+import json
 from datetime import datetime, time as dtime, timedelta, timezone
 from typing import Annotated
 
@@ -89,12 +90,19 @@ async def alarms_since(
             select(AIVisionCamera).where(AIVisionCamera.id.in_(cam_ids))
         )).scalars().all()
     } if cam_ids else {}
-    evts = {
-        e.id: e.name
-        for e in (await db.execute(
+    evt_objs = (
+        await db.execute(
             select(AIVisionEvent).where(AIVisionEvent.id.in_(evt_ids))
-        )).scalars().all()
-    } if evt_ids else {}
+        )
+    ).scalars().all() if evt_ids else []
+    evts = {e.id: e.name for e in evt_objs}
+    # 解析事件判定方式，供前端判断是否为人脸识别告警（时间线小框决定是否显示转人脸库）
+    evt_detectors: dict[int, str] = {}
+    for e in evt_objs:
+        try:
+            evt_detectors[e.id] = str(json.loads(e.rule or "{}").get("detector", "object"))
+        except (ValueError, TypeError):
+            evt_detectors[e.id] = "object"
     # 摄像头源类型（video 源告警可跳转进度条；camera 源看抓拍图）
     cam_types = {
         c.id: (c.source_type or "camera")
@@ -113,6 +121,7 @@ async def alarms_since(
             "camera_name": cams.get(a.camera_id, ""),
             "source_type": cam_types.get(a.camera_id, "camera"),
             "event_name": evts.get(a.event_id, ""),
+            "event_detector": evt_detectors.get(a.event_id, ""),
             "category_code": a.category_code,
             "confidence": a.confidence,
             "level": a.level,

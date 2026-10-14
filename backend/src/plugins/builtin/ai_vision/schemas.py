@@ -118,6 +118,19 @@ class EventRule(BaseModel):
     identity_seconds: float = Field(default=30, ge=1, le=600, description="非登记人员持续在岗多少秒告警")
     identity_threshold: float = Field(default=0.55, ge=0.1, le=0.95, description="体貌相似度阈值，低于视为非登记人员")
     identity_interval: float = Field(default=5, ge=1, le=30, description="特征提取间隔秒（省 CPU）")
+    # ── 人脸识别（face 判定器，内置 YuNet+SFace 模型，无需绑定 YOLO 模型）──
+    face_mode: str = Field(default="stranger", description="人脸识别模式：stranger=陌生人告警 / blacklist=黑名单告警 / record=识别记录 / verify=1:1人证核验")
+    face_threshold: float = Field(default=0.363, ge=0.2, le=0.8, description="人脸余弦相似度阈值（SFace 官方 0.363；P0 实测同人≥0.634 / 异人≤0.209，分布完全分离）")
+    face_min_size: int = Field(default=40, ge=20, le=200, description="最小人脸边长(px)，过滤远处小人脸")
+    face_interval: float = Field(default=1.0, ge=0.2, le=10, description="识别间隔秒（非识别帧沿用 IoU 跟踪的身份，标签不闪且省 CPU）")
+    face_hold_seconds: float = Field(default=3, ge=1, le=60, description="陌生人持续出现多少秒才告警（stranger 模式，防路过误报）")
+    face_record_interval: float = Field(default=60, ge=10, le=3600, description="同一人流水记录节流秒（record 模式，防每秒一条刷屏）")
+    # ── 活体防伪（face 判定器可选门控，默认关）──
+    face_liveness: bool = Field(default=False, description="开启活体检测：识别前先判真人，挡照片/屏幕翻拍攻击（CPU +8~14ms/脸）")
+    face_liveness_threshold: float = Field(default=0.5, ge=0.3, le=0.9, description="真人概率阈值，低于视为翻拍攻击（调高更严格，误杀也更多）")
+    # ── 1:1 人证核验（face_mode=verify）──
+    face_verify_person_id: int = Field(default=0, ge=0, description="核验对象的人脸库人员 ID（0=未选择，此时不判定）")
+    face_verify_seconds: float = Field(default=10, ge=3, le=300, description="人证不符持续多少秒告警（verify 模式）")
 
     @model_validator(mode="after")
     def _sync_duration_vote(self) -> "EventRule":

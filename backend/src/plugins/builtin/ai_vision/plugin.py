@@ -23,6 +23,8 @@ from src.plugins.builtin.ai_vision.models import (  # noqa: F401
     AIVisionCategory,
     AIVisionEvent,
     AIVisionEventModel,
+    AIVisionFace,
+    AIVisionFaceLog,
     AIVisionModel,
     AIVisionRuntimeStatus,
     AIVisionSample,
@@ -45,6 +47,8 @@ _AIVISION_TABLES = [
     AIVisionTraining.__table__,
     AIVisionRuntimeStatus.__table__,
     AIVisionStaff.__table__,
+    AIVisionFace.__table__,
+    AIVisionFaceLog.__table__,
 ]
 
 
@@ -155,6 +159,10 @@ class AIVisionPlugin(PluginInterface):
             ("idx_ai_sample_cat", "CREATE INDEX IF NOT EXISTS idx_ai_sample_cat ON ai_vision_samples (category_code)"),
             ("idx_ai_train_status", "CREATE INDEX IF NOT EXISTS idx_ai_train_status ON ai_vision_trainings (status)"),
             ("idx_ai_evtmodel_event", "CREATE INDEX IF NOT EXISTS idx_ai_evtmodel_event ON ai_vision_event_models (event_id, model_id)"),
+            ("idx_ai_face_group", "CREATE INDEX IF NOT EXISTS idx_ai_face_group ON ai_vision_faces (\"group\")"),
+            ("idx_ai_face_log_cam", "CREATE INDEX IF NOT EXISTS idx_ai_face_log_cam ON ai_vision_face_logs (camera_id, id)"),
+            ("idx_ai_face_log_person", "CREATE INDEX IF NOT EXISTS idx_ai_face_log_person ON ai_vision_face_logs (person_id, id)"),
+            ("idx_ai_face_log_created", "CREATE INDEX IF NOT EXISTS idx_ai_face_log_created ON ai_vision_face_logs (created_at)"),
         ]
         try:
             async with engine.begin() as conn:
@@ -173,6 +181,16 @@ class AIVisionPlugin(PluginInterface):
                 else:
                     await conn.execute(
                         text("CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_model_name ON ai_vision_models (name)")
+                    )
+                # faces.name 唯一索引（人脸库同名唯一契约）：同样先去重
+                dup_face = (await conn.execute(
+                    text("SELECT name, COUNT(*) FROM ai_vision_faces GROUP BY name HAVING COUNT(*) > 1")
+                )).fetchall()
+                if dup_face:
+                    logger.warning(f"[AIVision] skip unique index on faces.name, duplicates: {dup_face}")
+                else:
+                    await conn.execute(
+                        text("CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_face_name ON ai_vision_faces (name)")
                     )
                 logger.info(f"[AIVision] indexes ensured ({len(indexes)} + name-unique)")
         except Exception as exc:  # noqa: BLE001

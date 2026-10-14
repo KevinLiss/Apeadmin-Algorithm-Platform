@@ -69,7 +69,8 @@ async def _build_binding(db: AsyncSession, task: AIVisionTask) -> TaskBinding:
         model_ids = json.loads(event.model_ids or "[]")
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=f"事件配置解析失败: {exc}") from exc
-    if not model_ids:
+    if not model_ids and str(rule.get("detector", "object")) != "face":
+        # 人脸识别（detector=face）用内置 YuNet+SFace，不依赖绑定的 YOLO 模型
         raise HTTPException(status_code=400, detail="事件未绑定模型，请先绑定模型版本")
     return TaskBinding(
         task_id=task.id,

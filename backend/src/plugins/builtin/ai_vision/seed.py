@@ -81,6 +81,11 @@ async def _seed_menus(db: AsyncSession) -> None:
         ("模型训练", "AI 视觉平台", "C", "train", "ai_vision/train/index", "ai_vision:train:list", "Cpu", 7),
         ("发起训练", "模型训练", "F", None, None, "ai_vision:train:create", None, 1),
         ("停止训练", "模型训练", "F", None, None, "ai_vision:train:control", None, 2),
+        # ── 人脸识别（P1 人脸库 + 识别记录；识别事件表单的人脸判定方式见 P2）──
+        ("人脸库", "AI 视觉平台", "C", "faces", "ai_vision/faces/index", "ai_vision:face:list", "UserFilled", 7),
+        ("登记人脸", "人脸库", "F", None, None, "ai_vision:face:create", None, 1),
+        ("删除人脸", "人脸库", "F", None, None, "ai_vision:face:delete", None, 2),
+        ("识别记录", "AI 视觉平台", "C", "face-logs", "ai_vision/face_logs/index", "ai_vision:face_log:list", "Tickets", 8),
     ]
 
     existing = list((await db.execute(select(Menu))).scalars().all())
@@ -210,6 +215,14 @@ async def _seed_categories(db: AsyncSession) -> None:
             "source": "builtin",
             "coco_map": {},
             "description": "救生员（特定制服）检测类别：样本库标注此类别后可在工作台训练针对性检测模型，供救生员离岗检测使用",
+        },
+        {
+            "code": "face",
+            "name": "人脸",
+            "icon": "UserFilled",
+            "source": "builtin",
+            "coco_map": {},
+            "description": "人脸识别事件告警类别（陌生人/黑名单命中，detector=face，不依赖检测模型类别映射）",
         },
     ]
 

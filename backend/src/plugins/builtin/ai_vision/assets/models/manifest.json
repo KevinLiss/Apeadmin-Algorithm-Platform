@@ -75,6 +75,51 @@
       "license_note": "基于 Wang-Kaikai/drowning-detection-dataset（GitHub，3 类 swimming/tread water/drowning）均衡子集（train 2700/val 600）在 yolo11n 上 CPU 训练 30 epochs 导出 ONNX（imgsz 640 / opset 17）。val mAP50=0.987 / mAP50-95=0.698。数据集许可未声明，商用前需确认。",
       "description": "溺水检测（水面状态：游泳/踩水挣扎/溺水）",
       "classes": ["swimming", "tread_water", "drowning"]
+    },
+    {
+      "name": "face-detection-yunet",
+      "file": "face_detection_yunet_2023mar.onnx",
+      "version": "1.0.0",
+      "sha256": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
+      "file_size": 232589,
+      "category_map": {},
+      "input_size": 320,
+      "quantized": false,
+      "source": "builtin",
+      "url": "https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet",
+      "license_note": "YuNet 人脸检测（opencv_zoo，MIT 许可，可商用）。Git LFS 下载，SHA256 已校验。经 cv2.FaceDetectorYN 运行；P0 实测 score 阈值取 0.6（官方默认 0.9 在监控/压缩/远景场景漏检严重）。",
+      "description": "人脸检测（框+5关键点，人脸识别内置模型，配合 face-recognition-sface）",
+      "classes": []
+    },
+    {
+      "name": "face-recognition-sface",
+      "file": "face_recognition_sface_2021dec.onnx",
+      "version": "1.0.0",
+      "sha256": "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
+      "file_size": 38696353,
+      "category_map": {},
+      "input_size": 112,
+      "quantized": false,
+      "source": "builtin",
+      "url": "https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface",
+      "license_note": "SFace 人脸识别（opencv_zoo，MIT 许可，可商用）。Git LFS 下载，SHA256 已校验。经 cv2.FaceRecognizerSF 运行（内置 5 点对齐）；128 维特征，余弦阈值 0.363（P0 实测同人 min 0.634 / 异人 max 0.209，分布完全分离）。",
+      "description": "人脸特征识别（128 维向量，1:N 比对内置模型，配合 face-detection-yunet）",
+      "classes": []
+    },
+    {
+      "name": "face-antispoof-minifasnet-v2se",
+      "file": "face_antispoof_minifasnet_v2se.onnx",
+      "version": "1.0.0",
+      "sha256": "fde20585635cae62ed1d41796f76b6f8bc4b92cd91ec1cf0f1bc6485d2d587a9",
+      "file_size": 626197,
+      "category_map": {},
+      "input_size": 128,
+      "quantized": true,
+      "source": "builtin",
+      "url": "https://github.com/facenox/face-antispoof-onnx",
+      "license_note": "MiniFASNetV2-SE 人脸活体检测（facenox/face-antispoof-onnx，Apache-2.0，可商用；架构源自 minivision-ai/Silent-Face-Anti-Spoofing，同为 Apache-2.0；权重为该作者独立训练，70k 样本约 98% 准确率）。INT8 量化 ONNX，输入 128x128 RGB，输出 2 维 logits[real,spoof]，real-spoof 经 sigmoid 得真人概率，默认阈值 0.5。注意：挡的是摄像头翻拍纸张/屏幕攻击（纸纹/摩尔纹/边框），干净数码图片直喂不在威胁模型内。",
+      "description": "人脸活体检测（防照片/屏幕翻拍攻击，配合人脸识别使用，规则 face_liveness 开启）",
+      "classes": []
     }
   ]
 }

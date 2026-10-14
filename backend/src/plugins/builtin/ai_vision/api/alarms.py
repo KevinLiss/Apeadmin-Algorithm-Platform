@@ -99,23 +99,30 @@ async def list_alarms(
     stmt = stmt.order_by(AIVisionAlarm.id.desc()).offset((page - 1) * page_size).limit(page_size)
     items = (await db.execute(stmt)).scalars().all()
 
-    # 联表取摄像头名/事件名（一次查询缓存）
+    # 联表取摄像头名/事件名（一次查询缓存）+ 事件判定方式（前端"转人脸库"按钮用）
     cam_ids = {a.camera_id for a in items}
     evt_ids = {a.event_id for a in items}
     cams = {
         c.id: c.name
         for c in (await db.execute(select(AIVisionCamera).where(AIVisionCamera.id.in_(cam_ids)))).scalars().all()
     } if cam_ids else {}
-    evts = {
-        e.id: e.name
-        for e in (await db.execute(select(AIVisionEvent).where(AIVisionEvent.id.in_(evt_ids)))).scalars().all()
-    } if evt_ids else {}
+    evt_objs = (
+        await db.execute(select(AIVisionEvent).where(AIVisionEvent.id.in_(evt_ids)))
+    ).scalars().all() if evt_ids else []
+    evts = {e.id: e.name for e in evt_objs}
+    evt_detectors: dict[int, str] = {}
+    for e in evt_objs:
+        try:
+            evt_detectors[e.id] = str(json.loads(e.rule or "{}").get("detector", "object"))
+        except (ValueError, TypeError):
+            evt_detectors[e.id] = "object"
 
     result = []
     for a in items:
         d = _parse_out(a)
         d["camera_name"] = cams.get(a.camera_id, "")
         d["event_name"] = evts.get(a.event_id, "")
+        d["event_detector"] = evt_detectors.get(a.event_id, "")
         result.append(d)
 
     return success_response(data={

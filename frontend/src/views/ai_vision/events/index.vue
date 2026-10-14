@@ -26,6 +26,7 @@
           <el-tag v-else-if="row.rule?.detector === 'climbing'" size="small" type="danger" style="margin-left: 6px">攀爬翻越</el-tag>
           <el-tag v-else-if="row.rule?.detector === 'absence'" size="small" type="info" style="margin-left: 6px">离岗检测</el-tag>
           <el-tag v-else-if="row.rule?.detector === 'identity'" size="small" type="success" style="margin-left: 6px">人岗验证</el-tag>
+          <el-tag v-else-if="row.rule?.detector === 'face'" size="small" type="primary" style="margin-left: 6px">人脸识别</el-tag>
         </template>
       </el-table-column>
       <el-table-column label="类别" min-width="120">
@@ -106,6 +107,7 @@
             <el-radio-button value="climbing">攀爬翻越</el-radio-button>
             <el-radio-button value="absence">离岗检测</el-radio-button>
             <el-radio-button value="identity">人岗验证</el-radio-button>
+            <el-radio-button value="face">人脸识别</el-radio-button>
           </el-radio-group>
           <el-text v-if="form.rule.detector === 'diving'" size="small" type="warning" style="margin-top: 4px">
             需绑定姿态模型（yolo11n-pose），类别选择"人员"
@@ -122,14 +124,23 @@
           <el-text v-else-if="form.rule.detector === 'identity'" size="small" type="warning" style="margin-top: 4px">
             在岗人员与登记员工体貌比对，不符持续超阈值告警：需绑定含"人员"类的检测模型 + 标定岗位 ROI + 登记员工档案
           </el-text>
+          <el-text v-else-if="form.rule.detector === 'face'" size="small" type="warning" style="margin-top: 4px">
+            陌生人告警 / 黑名单告警 / 识别记录 / 1:1 人证核验：用内置 YuNet+SFace 模型（无需绑定检测模型，可选活体检测），需先在「人脸库」登记人员
+          </el-text>
         </el-form-item>
         <el-form-item label="目标类别" required>
-          <el-select v-model="form.category_codes" multiple placeholder="选择要识别的目标类别" style="width: 100%" :disabled="['diving', 'diving_top', 'climbing', 'absence', 'identity'].includes(form.rule.detector)">
+          <el-select v-model="form.category_codes" multiple placeholder="选择要识别的目标类别" style="width: 100%" :disabled="['diving', 'diving_top', 'climbing', 'absence', 'identity', 'face'].includes(form.rule.detector)">
             <el-option v-for="c in categories" :key="c.code" :label="`${c.name} (${c.code})`" :value="c.code" :disabled="c.status !== 1" />
           </el-select>
         </el-form-item>
-        <el-form-item label="绑定模型" :required="form.status === 'ready' || form.status === 'running'">
-          <el-select v-model="form.model_ids" multiple placeholder="选择检测模型（发布后不可为空）" style="width: 100%">
+        <el-form-item label="绑定模型" :required="(form.status === 'ready' || form.status === 'running') && form.rule.detector !== 'face'">
+          <el-select
+            v-model="form.model_ids"
+            multiple
+            :disabled="form.rule.detector === 'face'"
+            :placeholder="form.rule.detector === 'face' ? '人脸识别无需选择模型（系统已默认内置模型）' : '选择检测模型（发布后不可为空）'"
+            style="width: 100%"
+          >
             <el-option v-for="m in models" :key="m.id" :label="`${m.name} v${m.version}${m.quantized ? ' (INT8)' : ''}`" :value="m.id" />
           </el-select>
           <el-text size="small" type="info">
@@ -137,6 +148,7 @@
             <template v-else-if="form.rule.detector === 'diving_top'">高空俯视跳水必须选择 yolo11n-coco 目标检测模型</template>
             <template v-else-if="form.rule.detector === 'climbing'">攀爬翻越必须选择 yolo11n-pose 姿态模型</template>
             <template v-else-if="form.rule.detector === 'absence' || form.rule.detector === 'identity'">必须选择含"人员"类的检测模型（yolo11n-coco）</template>
+            <template v-else-if="form.rule.detector === 'face'">系统已默认内置 YuNet+SFace 人脸模型，无需也不能选择；人员登记见「人脸库」页</template>
             <template v-else>需选择与目标类别匹配的模型</template>
           </el-text>
         </el-form-item>
@@ -298,6 +310,76 @@
             <el-button link type="primary" size="small" @click="staffDrawer = true; fetchStaffList()">管理员工档案</el-button>
           </el-form-item>
         </template>
+        <template v-else-if="form.rule.detector === 'face'">
+          <el-form-item label="识别模式">
+            <el-radio-group v-model="form.rule.face_mode">
+              <el-radio-button value="stranger">陌生人告警</el-radio-button>
+              <el-radio-button value="blacklist">黑名单告警</el-radio-button>
+              <el-radio-button value="record">识别记录</el-radio-button>
+              <el-radio-button value="verify">1:1 人证核验</el-radio-button>
+            </el-radio-group>
+            <el-text size="small" type="info" style="display: block">
+              陌生人 = 不在白名单的人持续出现 N 秒后告警；黑名单 = 命中即报（附姓名相似度）；
+              识别记录 = 只记流水不告警（考勤/轨迹用，在「识别记录」页查询）；
+              1:1 核验 = 眼前人必须是选定登记人，人证不符持续 N 秒告警
+            </el-text>
+          </el-form-item>
+          <el-form-item v-if="form.rule.face_mode === 'verify'" label="核验对象" required>
+            <el-select v-model="form.rule.face_verify_person_id" placeholder="选择人脸库中的人员（须已登记）" filterable style="width: 100%">
+              <el-option
+                v-for="f in faceOptions"
+                :key="f.id"
+                :label="`${f.name}${f.staff_no ? ' (' + f.staff_no + ')' : ''}${f.group === 'blacklist' ? '［黑名单］' : ''}`"
+                :value="f.id"
+              />
+            </el-select>
+            <el-text size="small" type="info" style="display: block">
+              核验通过不告警；人证不符持续超时限告警。未选择时判定不生效（任务不会误报）。
+              人员管理见「人脸库」页。
+            </el-text>
+          </el-form-item>
+          <el-form-item v-if="form.rule.face_mode === 'verify'" label="持续时长(s)">
+            <el-input-number v-model="form.rule.face_verify_seconds" :min="3" :max="300" :step="5" />
+            <el-text size="small" type="info">人证不符持续超过该秒数才告警（防路过/短暂入镜误报）</el-text>
+          </el-form-item>
+          <el-form-item label="相似度阈值">
+            <el-slider v-model="form.rule.face_threshold" :min="0.2" :max="0.8" :step="0.01" show-input />
+            <el-text size="small" type="info">人脸比对的余弦相似度阈值，默认 0.363（误报多调高，漏识别调低）</el-text>
+          </el-form-item>
+          <el-form-item label="最小人脸(px)">
+            <el-input-number v-model="form.rule.face_min_size" :min="20" :max="200" :step="10" />
+            <el-text size="small" type="info">小于该边长的人脸不识别（过滤远处小人脸，省 CPU 防误报）</el-text>
+          </el-form-item>
+          <el-form-item label="识别间隔(s)">
+            <el-input-number v-model="form.rule.face_interval" :min="0.2" :max="10" :step="0.2" :precision="1" />
+            <el-text size="small" type="info">每隔几秒做一次识别（间隔内沿用上次身份，画面标签不闪烁）</el-text>
+          </el-form-item>
+          <el-form-item v-if="form.rule.face_mode === 'stranger'" label="持续时长(s)">
+            <el-input-number v-model="form.rule.face_hold_seconds" :min="1" :max="60" />
+            <el-text size="small" type="info">陌生人持续出现超过该秒数才告警（防路过/短暂入镜误报）</el-text>
+          </el-form-item>
+          <el-form-item v-if="form.rule.face_mode === 'record'" label="记录节流(s)">
+            <el-input-number v-model="form.rule.face_record_interval" :min="10" :max="3600" :step="10" />
+            <el-text size="small" type="info">同一个人每隔该秒数才记一条流水（默认 60s，防刷屏）</el-text>
+          </el-form-item>
+          <el-form-item label="活体检测">
+            <el-switch v-model="form.rule.face_liveness" />
+            <el-text size="small" type="info" style="display: block">
+              开启后先判真人再识别：挡住拿照片/屏幕翻拍冒充的攻击（CPU +8~14ms/脸）。
+              对高清屏翻拍不是 100% 可靠；误杀可调高阈值或关闭
+            </el-text>
+          </el-form-item>
+          <el-form-item v-if="form.rule.face_liveness" label="真人阈值">
+            <el-slider v-model="form.rule.face_liveness_threshold" :min="0.3" :max="0.9" :step="0.05" show-input />
+            <el-text size="small" type="info">真人概率低于该值视为翻拍攻击（调高更严格，误杀也更多）</el-text>
+          </el-form-item>
+          <el-form-item label="人脸库">
+            <el-text size="small" type="warning" style="display: block">
+              请先在「人脸库」页登记人员（白名单/黑名单）；白名单为空时陌生人模式会把所有人都判为陌生人
+            </el-text>
+            <el-button link type="primary" size="small" @click="router.push('/ai-vision/faces')">前往人脸库登记</el-button>
+          </el-form-item>
+        </template>
         <el-form-item label="冷却(s)">
           <el-input-number v-model="form.rule.cooldown" :min="0" :max="3600" />
         </el-form-item>
@@ -425,6 +507,16 @@ const form = reactive({
     identity_threshold: 0.55,
     identity_seconds: 30,
     identity_interval: 5,
+    face_mode: 'stranger',
+    face_threshold: 0.363,
+    face_min_size: 40,
+    face_interval: 1.0,
+    face_hold_seconds: 3,
+    face_record_interval: 60,
+    face_liveness: false,
+    face_liveness_threshold: 0.5,
+    face_verify_person_id: 0,
+    face_verify_seconds: 10,
   },
 })
 
@@ -572,6 +664,12 @@ function onDetectorChange(v: string) {
     const coco = models.value.find((m: any) => m.name?.includes('coco') && !m.name?.includes('pose'))
     if (coco) form.model_ids = [coco.id]
     fetchStaffCount()
+  } else if (v === 'face') {
+    // 人脸识别：内置 YuNet+SFace，无需绑定模型；告警类别=人脸
+    form.category_codes = ['face']
+    form.model_ids = []
+    if (form.rule.fps > 2) form.rule.fps = 2
+    if (form.rule.cooldown < 30) form.rule.cooldown = 60
   } else {
     if (form.rule.fps > 2) form.rule.fps = 2
   }
@@ -603,6 +701,17 @@ async function fetchModels() {
   try {
     const res: any = await request.get('/ai-vision/models', { params: { page: 1, page_size: 100 } })
     models.value = res.items || []
+  } catch {
+    // handled by interceptor
+  }
+}
+
+/** 人脸库人员（verify 模式核验对象选择器用；只列已提取特征的） */
+const faceOptions = ref<any[]>([])
+async function fetchFaceOptions() {
+  try {
+    const res: any = await request.get('/ai-vision/faces')
+    faceOptions.value = (res.items || []).filter((f: any) => f.has_embedding)
   } catch {
     // handled by interceptor
   }
@@ -887,7 +996,8 @@ async function handleSave() {
 
 async function handlePublish(row: any) {
   // 前端预校验：未绑模型直接阻止，避免启动任务时才报错
-  if (!row.model_ids?.length) {
+  // （人脸识别用内置 YuNet+SFace，无需绑定模型，放行）
+  if (!row.model_ids?.length && row.rule?.detector !== 'face') {
     ElMessage.warning(`事件「${row.name}」还未绑定检测模型，请先编辑并选择模型`)
     return
   }
@@ -922,6 +1032,7 @@ onMounted(() => {
   fetchList()
   fetchCategories()
   fetchModels()
+  fetchFaceOptions()
 })
 </script>
 

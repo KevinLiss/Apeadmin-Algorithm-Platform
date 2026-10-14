@@ -41,6 +41,16 @@ def samples_dir() -> Path:
     return UPLOADS_AI_VISION_DIR / "samples"
 
 
+def faces_dir() -> Path:
+    """人脸库登记照目录：uploads/ai_vision/faces（按 group/姓名 建子目录）。"""
+    return UPLOADS_AI_VISION_DIR / "faces"
+
+
+def face_logs_dir() -> Path:
+    """人脸识别流水特写图目录：uploads/ai_vision/face_logs。"""
+    return UPLOADS_AI_VISION_DIR / "face_logs"
+
+
 def datasets_dir() -> Path:
     """导出的 YOLO 数据集目录：uploads/ai_vision/datasets/{job_id}。"""
     return UPLOADS_AI_VISION_DIR / "datasets"

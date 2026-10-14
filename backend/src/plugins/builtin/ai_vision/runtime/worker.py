@@ -42,6 +42,7 @@ from src.plugins.builtin.ai_vision.runtime.events import (
     WORKER_STOPPED,
     RuntimeEvent,
 )
+from src.plugins.builtin.ai_vision.runtime.face.detector import FaceDetector
 
 # 断线重连参数
 _RECONNECT_BASE = 1.0
@@ -1424,6 +1425,8 @@ class StreamWorker:
                 task.detector = AbsenceDetector(rule, task.analyze_fps)
             elif mode == "identity":
                 task.detector = IdentityDetector(rule, task.analyze_fps)
+            elif mode == "face":
+                task.detector = FaceDetector(rule, task.analyze_fps)
             else:
                 task.detector = EventDetector(rule, task.analyze_fps)
 
@@ -1558,6 +1561,63 @@ class StreamWorker:
                     self._raise_alarm(task, person_dets, action_label="wrong_person")
             return boxes
 
+        # ── 人脸识别路径（face）：YuNet+SFace → 人脸库比对 → 三模式 ──
+        # 不需要绑定 YOLO 模型（人脸检测/识别由内置 YuNet+SFace 完成），
+        # 事件的 model_ids 可为空；人脸库登记见「人脸库」页。
+        if isinstance(task.detector, FaceDetector):
+            from src.plugins.builtin.ai_vision.runtime.face.engine import get_face_engine
+
+            eng = get_face_engine()
+            if eng is None:
+                if not getattr(self, "_face_warned", False):
+                    logger.warning(
+                        f"[AIVision] task {task.task_id}: face 判定需要人脸模型"
+                        "（assets/models 下 face_detection_yunet_2023mar.onnx +"
+                        " face_recognition_sface_2021dec.onnx，缺失时识别不生效）"
+                    )
+                    self._face_warned = True
+                return []
+            result = task.detector.feed(
+                frame, eng, time.time(), task_id=task.task_id, camera_id=self.camera_id
+            )
+            boxes = [
+                {
+                    "x1": max(0.0, min(1.0, m.bbox[0] / fw)),
+                    "y1": max(0.0, min(1.0, m.bbox[1] / fh)),
+                    "x2": max(0.0, min(1.0, m.bbox[2] / fw)),
+                    "y2": max(0.0, min(1.0, m.bbox[3] / fh)),
+                    "label": f"{m.cls_name} {m.conf:.2f}",
+                }
+                for m in result.matches[:5]
+            ]
+            if result.alarm:
+                note = ""
+                if task.detector.mode == "blacklist":
+                    hit = next(
+                        (m for m in result.matches if m.is_known and m.group == "blacklist"), None
+                    )
+                    if hit:
+                        note = f"黑名单命中: {hit.cls_name}（相似度 {hit.similarity:.2f}）"
+                elif task.detector.mode == "stranger":
+                    unknown = next((m for m in result.matches if not m.is_known), None)
+                    if unknown:
+                        note = (
+                            f"陌生人持续驻留（最高相似度 {unknown.similarity:.2f}，"
+                            f"低于阈值 {task.detector.threshold}）"
+                        )
+                elif task.detector.mode == "verify":
+                    unknown = next((m for m in result.matches if not m.is_known), None)
+                    if unknown:
+                        note = (
+                            f"人证不符：与登记人最高相似度 {unknown.similarity:.2f}"
+                            f"（阈值 {task.detector.threshold}），持续超 "
+                            f"{task.detector.verify_seconds}s"
+                        )
+                self._raise_alarm(task, result.matches, note=note)
+            if result.log_rows:
+                self._db_insert_face_logs(result.log_rows, frame)
+            return boxes
+
         # ── 目标检测路径（原有逻辑）─────────────────────────
         # 收集该事件关心的所有检测
         all_dets: list[Any] = []
@@ -1613,10 +1673,11 @@ class StreamWorker:
         }
         return box
 
-    def _raise_alarm(self, task: TaskBinding, dets: list[Any], action_label: str = "") -> None:
+    def _raise_alarm(self, task: TaskBinding, dets: list[Any], action_label: str = "", note: str = "") -> None:
         """告警落库 + 抓拍图 + 事件回调 + 告警总线发布。
 
         action_label: 动作识别结果标签（如 diving），附加到告警 note 字段。
+        note: 直接指定告警备注（人脸识别等非动作类场景用，优先于 action_label）。
         """
         try:
             # 置信度：告警触发瞬间目标通常已消失（dets 为空）——跳水路径回退到
@@ -1638,7 +1699,7 @@ class StreamWorker:
                 "video_ts": round(self._video_ts, 2),
                 "level": "warning",
                 "status": "pending",
-                "note": f"动作识别: {action_label}" if action_label else "",
+                "note": note or (f"动作识别: {action_label}" if action_label else ""),
             }
             alarm_id = self._db_insert_alarm(alarm)
             self.stats.last_alarm_at = time.time()
@@ -1738,6 +1799,57 @@ class StreamWorker:
             db.commit()
             db.refresh(row)
             return row.id
+
+    def _db_insert_face_logs(self, rows: list[dict], frame: Any) -> None:
+        """record 模式：人脸特写小图落盘 + 流水批量入库（sync session）。
+
+        rows 来自 FaceDetector.feed 的 log_rows（已按 record_interval 节流）；
+        特写图存 uploads/ai_vision/face_logs/{camera_id}/{ts}_{idx}.jpg。
+        """
+        import cv2
+
+        from src.plugins.builtin.ai_vision.models import AIVisionFaceLog
+        from src.plugins.builtin.ai_vision.paths import face_logs_dir
+        from src.plugins.builtin.ai_vision.runtime.syncdb import sync_session
+
+        if not rows or frame is None:
+            return
+        cam_id = int(rows[0].get("camera_id", self.camera_id))
+        log_dir = face_logs_dir() / str(cam_id)
+        ts_tag = time.strftime("%Y%m%d_%H%M%S")
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+        objs: list[Any] = []
+        for idx, r in enumerate(rows):
+            snap = ""
+            try:
+                x1, y1, x2, y2 = (int(v) for v in r["bbox"])
+                crop = frame[max(0, y1):max(0, y2), max(0, x1):max(0, x2)]
+                if crop.size:
+                    p = log_dir / f"{ts_tag}_{idx}.jpg"
+                    cv2.imwrite(str(p), crop, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                    snap = str(p)
+            except Exception:  # noqa: BLE001
+                pass
+            objs.append(
+                AIVisionFaceLog(
+                    person_id=int(r.get("person_id", 0)),
+                    person_name=r.get("person_name", ""),
+                    group=r.get("group", ""),
+                    camera_id=cam_id,
+                    task_id=int(r.get("task_id", 0)),
+                    similarity=float(r.get("similarity", 0.0)),
+                    snapshot_path=snap,
+                )
+            )
+        try:
+            with sync_session() as db:
+                db.add_all(objs)
+                db.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[AIVision] face log insert failed: {exc}")
 
     # ── 模型加载 ─────────────────────────────────────────────
     def _load_model(self, model_id: int) -> Any | None:
