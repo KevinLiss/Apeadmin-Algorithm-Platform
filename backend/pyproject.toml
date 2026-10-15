@@ -23,6 +23,10 @@ dependencies = [
     "redis>=5.0.0",
     "orjson>=3.10.0",
     "psutil>=5.9.0",
+    # ── AI 推理运行时真依赖（之前漏声明，导致干净环境/CI 装不上）──
+    "numpy>=1.24.0",
+    "opencv-python-headless>=4.10.0",
+    "onnxruntime>=1.16.0",
 ]
 
 [project.optional-dependencies]

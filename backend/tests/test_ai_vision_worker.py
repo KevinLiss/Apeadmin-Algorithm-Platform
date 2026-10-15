@@ -58,16 +58,19 @@ class TestPostProcessor:
         assert out[0].bbox == [0, 0, 100, 100]
 
     def test_roi_inside(self):
-        # ROI 三角形 (0,0)-(100,0)-(0,100)，中心 (25,25) 在内，(200,200) 在外
-        roi = [[0, 0], [100, 0], [0, 100]]
+        # ROI 已是归一化 0~1 坐标（生产逻辑）：三角形 (0,0)-(0.5,0)-(0,0.5)，
+        # 需传入帧宽高才能把检测框中心换算到归一化空间做包含测试。
+        # 检测 A 中心 (40,40)/640x480 ≈ (0.0625,0.083) → 在内；
+        # 检测 B 中心 (420,420) → (0.656,0.875) → 在外。
+        roi = [[0, 0], [0.5, 0], [0, 0.5]]
         pp = PostProcessor(roi=roi, min_size=5, threshold=0.45)
         dets = [
-            FakeDetection([20, 20, 30, 30]),    # 中心 25,25 → 在内
-            FakeDetection([180, 180, 220, 220]),  # 中心 200,200 → 在外
+            FakeDetection([20, 20, 60, 60]),       # 中心在内
+            FakeDetection([400, 400, 440, 440]),    # 中心在外
         ]
-        out = pp.filter(dets)
+        out = pp.filter(dets, frame_w=640, frame_h=480)
         assert len(out) == 1
-        assert out[0].bbox == [20, 20, 30, 30]
+        assert out[0].bbox == [20, 20, 60, 60]
 
     def test_roi_empty_means_full_frame(self):
         pp = PostProcessor(roi=[], min_size=5, threshold=0.45)
@@ -148,10 +151,14 @@ class TestStreamWorker:
         worker._last_frame = frame
         task = TaskBinding(task_id=1, event_id=1, camera_id=7, category_codes=["person"], rule={}, model_ids=[1])
         dets = [FakeDetection([100, 100, 300, 300], conf=0.95)]
-        path = worker._save_snapshot(task, dets)
-        assert path != ""
-        assert path.endswith(".jpg")
+        # _save_snapshot 返回 (画框图路径, 干净图路径, YOLO 归一化框列表)
+        snap_path, clean_path, boxes = worker._save_snapshot(task, dets)
+        assert snap_path != ""
+        assert snap_path.endswith(".jpg")
         from pathlib import Path
-        assert Path(path).exists()
+        assert Path(snap_path).exists()
         # 文件非空
-        assert Path(path).stat().st_size > 0
+        assert Path(snap_path).stat().st_size > 0
+        # 干净图同样应落盘（转样本用）
+        assert clean_path != "" and clean_path.endswith(".jpg")
+        assert Path(clean_path).exists()
