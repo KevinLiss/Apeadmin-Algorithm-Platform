@@ -6,6 +6,7 @@ import pytest
 from fastapi import FastAPI
 from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
 
 from src.core.seed import _remove_unimplemented_apeui_menus
 from src.db import Base
@@ -26,26 +27,45 @@ def reset_global_resources():
 
 
 @pytest.mark.asyncio
-async def test_enable_disable_reenable_tracks_and_removes_resources():
-    app = FastAPI()
-    manager = PluginManager()
-    manager._discover_one("dev_example")
+async def test_enable_disable_reenable_tracks_and_removes_resources(monkeypatch):
+    # 插件 install() 会往 sys_menu 等表 seed 数据，但它只自建插件自己的表，
+    # 依赖 init_db() 已全量建表。这里自建内存库全量建表，并把 src.db 的
+    # engine/SessionLocal 重定向过去，避免依赖开发机上的真实 apeadmin.db
+    # （CI 干净 checkout 无该文件，否则报 no such table: sys_menu）。
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr("src.db.engine", engine)
+    monkeypatch.setattr("src.db.SessionLocal", session_factory)
+    monkeypatch.setattr("src.plugins.builtin.dev_example.plugin.SessionLocal", session_factory)
 
-    enabled = await manager.enable_plugin("dev_example", app)
-    assert enabled["status"] == "active"
-    assert enabled["routes_registered"] == 1
+    try:
+        app = FastAPI()
+        manager = PluginManager()
+        manager._discover_one("dev_example")
 
-    disabled = await manager.disable_plugin("dev_example", app)
-    assert disabled["routes_removed"] == 1
-    # dev_example registers 2 MCP tools (list_notes / create_note);
-    # disabling the plugin must unregister them.
-    assert disabled["mcp_tools_removed"] == 2
-    assert disabled["events_unsubscribed"] == 1
+        enabled = await manager.enable_plugin("dev_example", app)
+        assert enabled["status"] == "active"
+        assert enabled["routes_registered"] == 1
 
-    enabled_again = await manager.enable_plugin("dev_example", app)
-    assert enabled_again["status"] == "active"
-    assert enabled_again["routes_registered"] == 1
-    await manager.disable_plugin("dev_example", app)
+        disabled = await manager.disable_plugin("dev_example", app)
+        assert disabled["routes_removed"] == 1
+        # dev_example registers 2 MCP tools (list_notes / create_note);
+        # disabling the plugin must unregister them.
+        assert disabled["mcp_tools_removed"] == 2
+        assert disabled["events_unsubscribed"] == 1
+
+        enabled_again = await manager.enable_plugin("dev_example", app)
+        assert enabled_again["status"] == "active"
+        assert enabled_again["routes_registered"] == 1
+        await manager.disable_plugin("dev_example", app)
+    finally:
+        await engine.dispose()
 
 
 def test_plugin_zip_rejects_unsafe_name_and_supports_single_root():
