@@ -131,6 +131,8 @@ class EventRule(BaseModel):
     # ── 1:1 人证核验（face_mode=verify）──
     face_verify_person_id: int = Field(default=0, ge=0, description="核验对象的人脸库人员 ID（0=未选择，此时不判定）")
     face_verify_seconds: float = Field(default=10, ge=3, le=300, description="人证不符持续多少秒告警（verify 模式）")
+    # ── 绑定指定人脸（黑名单/白名单/记录模式下可选：只匹配/比对指定人员，空=使用全部）──
+    face_selected_ids: list[int] = Field(default_factory=list, description="绑定的指定人脸库人员 ID 列表（空=不限制，使用对应分组全部人员）")
 
     @model_validator(mode="after")
     def _sync_duration_vote(self) -> "EventRule":

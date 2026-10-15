@@ -35,6 +35,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # ---- Startup ----
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}...")
 
+    # ---- 安全自检：默认密钥警告 ----
+    # JWT_SECRET 仍是脚手架默认值 → 任何人都能伪造 token，必须生产环境改 .env。
+    # （仅警告不阻断启动，避免破坏演示/测试环境。）
+    _DEFAULT_JWT_SECRET = "change-me-in-production-please-32chars!"
+    if settings.JWT_SECRET == _DEFAULT_JWT_SECRET:
+        logger.warning(
+            "⚠️ 安全警告：当前使用默认 JWT_SECRET，存在 token 被伪造的风险！"
+            " 请在生产环境 .env 中设置强随机 JWT_SECRET（≥32 位）。"
+        )
+
     # ---- Setup mode (un-installed) ----
     from src.setup_wizard import is_installed
 

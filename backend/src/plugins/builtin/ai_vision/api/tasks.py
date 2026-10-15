@@ -211,8 +211,8 @@ async def create_task(
     evt = await db.get(AIVisionEvent, body.event_id)
     if not evt or evt.is_deleted:
         raise HTTPException(status_code=400, detail="事件不存在或已删除")
-    if evt.status != "ready":
-        raise HTTPException(status_code=400, detail=f"事件状态 {evt.status} 不可启动任务（需 ready）")
+    if evt.status not in {"ready", "running"}:
+        raise HTTPException(status_code=400, detail=f"事件状态 {evt.status} 不可启动任务（需 ready 或 running）")
 
     # 同摄像头同事件去重
     dup = (await db.execute(

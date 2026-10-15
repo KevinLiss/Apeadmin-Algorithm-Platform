@@ -57,7 +57,7 @@ class FaceGallery:
         return len(self._ids)
 
     def best_match(
-        self, vec: np.ndarray, groups: tuple[str, ...] = ("whitelist",)
+        self, vec: np.ndarray, groups: tuple[str, ...] = ("whitelist",), filter_ids: set[int] | None = None
     ) -> tuple[dict | None, float]:
         """指定分组内与 ``vec`` 余弦相似度最高的人员。
 
@@ -65,15 +65,18 @@ class FaceGallery:
             vec: L2 归一化的 128 维特征。
             groups: 参与比对的分组（stranger 用 whitelist，blacklist 模式用
                 blacklist，record 模式可用全部）。
+            filter_ids: 若提供，则只在这些人员 ID 中比对（空集合视为无匹配）。
 
         Returns:
-            (人员 dict 或 None, 相似度)。库空/分组无成员返回 (None, 0.0)。
+            (人员 dict 或 None, 相似度)。库空/分组无成员/过滤后无成员返回 (None, 0.0)。
         """
         self._ensure(time.time())
         with self._mu:
             if self._mat.shape[0] == 0 or not self._ids:
                 return None, 0.0
             idx = [i for i, g in enumerate(self._groups) if g in set(groups)]
+            if filter_ids is not None:
+                idx = [i for i in idx if self._ids[i] in filter_ids]
             if not idx:
                 return None, 0.0
             sims = self._mat[idx] @ vec

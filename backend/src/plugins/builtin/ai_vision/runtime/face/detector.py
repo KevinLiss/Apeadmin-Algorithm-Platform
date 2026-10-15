@@ -109,6 +109,11 @@ class FaceDetector:
         # 1:1 核验参数
         self.verify_person_id = int(rule.get("face_verify_person_id", 0) or 0)
         self.verify_seconds = float(rule.get("face_verify_seconds", 10))
+        # 指定人脸绑定：只在这些人员 ID 中比对（空=不限制）
+        selected_raw = rule.get("face_selected_ids") or []
+        self.selected_ids: set[int] | None = (
+            set(int(x) for x in selected_raw) if selected_raw else None
+        )
         self._last_check = 0.0
         self._last_alarm_at = 0.0
         self._tracks: list[_Track] = []
@@ -222,7 +227,7 @@ class FaceDetector:
                 name = f"核验通过:{person['name']}" if known else "人证不符"
                 group = person["group"] if known else ""
             else:
-                person, sim = gallery.best_match(vec, groups=groups)
+                person, sim = gallery.best_match(vec, groups=groups, filter_ids=self.selected_ids)
                 known = person is not None and sim >= self.threshold
                 name = person["name"] if known else "陌生人"
                 group = person["group"] if known else ""

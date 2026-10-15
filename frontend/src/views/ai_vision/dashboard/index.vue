@@ -127,6 +127,42 @@
         </el-col>
       </el-row>
 
+      <!-- 告警处理统计 -->
+      <el-row :gutter="16" class="stat-cards">
+        <el-col :span="6">
+          <el-card shadow="never">
+            <div class="stat-card">
+              <div class="stat-label">待处理告警</div>
+              <div class="stat-value warning">{{ (overview.alarm_stats?.by_status || {}).pending ?? 0 }}</div>
+            </div>
+          </el-card>
+        </el-col>
+        <el-col :span="6">
+          <el-card shadow="never">
+            <div class="stat-card">
+              <div class="stat-label">已确认</div>
+              <div class="stat-value success">{{ (overview.alarm_stats?.by_status || {}).acknowledged ?? 0 }}</div>
+            </div>
+          </el-card>
+        </el-col>
+        <el-col :span="6">
+          <el-card shadow="never">
+            <div class="stat-card">
+              <div class="stat-label">误报率</div>
+              <div class="stat-value" :class="(overview.alarm_stats?.false_positive_rate || 0) >= 0.3 ? 'danger' : ''">{{ ((overview.alarm_stats?.false_positive_rate || 0) * 100).toFixed(1) }}%</div>
+            </div>
+          </el-card>
+        </el-col>
+        <el-col :span="6">
+          <el-card shadow="never">
+            <div class="stat-card">
+              <div class="stat-label">平均响应时长</div>
+              <div class="stat-value">{{ formatResp(overview.alarm_stats?.avg_response_seconds) }}</div>
+            </div>
+          </el-card>
+        </el-col>
+      </el-row>
+
       <!-- 系统资源与运行 worker -->
       <el-row :gutter="16" class="sys-row">
         <el-col :span="8">
@@ -204,6 +240,28 @@
           </el-card>
         </el-col>
       </el-row>
+
+      <!-- 误报事件 TOP5 -->
+      <el-row :gutter="16" class="chart-row">
+        <el-col :span="24">
+          <el-card shadow="never">
+            <template #header>误报事件 TOP5（按误报数量）</template>
+            <el-table
+              :data="overview.alarm_stats?.by_event_false_positive_top5 || []"
+              size="small"
+              stripe
+              empty-text="暂无误报记录"
+            >
+              <el-table-column prop="event_name" label="事件" min-width="160" />
+              <el-table-column label="误报数" width="120">
+                <template #default="{ row }">
+                  <el-tag type="danger" size="small">{{ row.false_positives }}</el-tag>
+                </template>
+              </el-table-column>
+            </el-table>
+          </el-card>
+        </el-col>
+      </el-row>
     </template>
   </div>
 </template>
@@ -230,6 +288,16 @@ const categories = ref<any[]>([])
 function categoryName(code: string) {
   if (!code || code === 'unknown') return '未知'
   return categories.value.find((c) => c.code === code)?.name || code
+}
+
+/** 平均响应时长（秒）→ 友好文案；null = 暂无已确认告警 */
+function formatResp(sec: number | null | undefined) {
+  if (sec == null) return '—'
+  const s = Math.round(sec)
+  if (s < 60) return `${s} 秒`
+  const m = Math.floor(s / 60)
+  const r = s % 60
+  return r ? `${m} 分 ${r} 秒` : `${m} 分`
 }
 
 const trendRef = ref<HTMLElement | null>(null)
@@ -458,6 +526,8 @@ onBeforeUnmount(() => {
 .stat-label { color: #909399; font-size: 13px; margin-bottom: 8px; }
 .stat-value { font-size: 30px; font-weight: 600; color: #303133; }
 .stat-value.warning { color: #e6a23c; }
+.stat-value.success { color: #67c23a; }
+.stat-value.danger { color: #f56c6c; }
 .stat-value .unit { font-size: 14px; font-weight: 400; color: #909399; }
 .sys-row { margin-bottom: 16px; }
 .sys-item { margin-bottom: 12px; }

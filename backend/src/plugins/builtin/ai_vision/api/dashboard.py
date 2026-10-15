@@ -171,6 +171,61 @@ async def dashboard_overview(
     # 总告警数（引导页第 3 步检测）
     total_alarms = len((await db.execute(select(AIVisionAlarm.id))).scalars().all())
 
+    # 告警处理统计：按状态分布 / 误报率 / 平均响应时长 / 误报事件 TOP5
+    status_rows = (await db.execute(
+        select(AIVisionAlarm.status, func.count(AIVisionAlarm.id))
+        .group_by(AIVisionAlarm.status)
+    )).all()
+    by_status = {s: c for s, c in status_rows}
+
+    fp_count = by_status.get("false_positive", 0)
+    ack_count = by_status.get("acknowledged", 0)
+    fp_rate = round(fp_count / total_alarms, 4) if total_alarms else 0.0
+    ack_rate = round(ack_count / total_alarms, 4) if total_alarms else 0.0
+
+    # 平均响应时长（仅已确认且 ack_at 非空）：用 Python 计算，避免 SQLite/PG 方言差异
+    resp_rows = (await db.execute(
+        select(AIVisionAlarm.created_at, AIVisionAlarm.ack_at)
+        .where(AIVisionAlarm.status == "acknowledged", AIVisionAlarm.ack_at.isnot(None))
+    )).all()
+    durations: list[float] = []
+    for _c, _a in resp_rows:
+        if _c and _a:
+            try:
+                durations.append((_a - _c).total_seconds())
+            except Exception:  # noqa: BLE001
+                pass
+    avg_response_seconds = round(sum(durations) / len(durations), 1) if durations else None
+
+    # 误报事件 TOP5（按 false_positive 数量降序）
+    ev_fp_rows = (await db.execute(
+        select(AIVisionAlarm.event_id, func.count(AIVisionAlarm.id))
+        .where(AIVisionAlarm.status == "false_positive")
+        .group_by(AIVisionAlarm.event_id)
+        .order_by(func.count(AIVisionAlarm.id).desc())
+        .limit(5)
+    )).all()
+    ev_names = {
+        e.id: e.name
+        for e in (await db.execute(
+            select(AIVisionEvent.id, AIVisionEvent.name).where(
+                AIVisionEvent.id.in_([r[0] for r in ev_fp_rows] if ev_fp_rows else [-1])
+            )
+        )).all()
+    }
+    by_event_false_positive_top5 = [
+        {"event_id": eid, "event_name": ev_names.get(eid, f"#{eid}"), "false_positives": cnt}
+        for eid, cnt in ev_fp_rows
+    ]
+
+    alarm_stats = {
+        "by_status": by_status,
+        "false_positive_rate": fp_rate,
+        "ack_rate": ack_rate,
+        "avg_response_seconds": avg_response_seconds,
+        "by_event_false_positive_top5": by_event_false_positive_top5,
+    }
+
     return success_response(data={
         "today_alarms": today_alarms,
         "pending_alarms": pending_alarms,
@@ -179,4 +234,5 @@ async def dashboard_overview(
         "event_distribution": event_distribution,
         "camera_ranking": camera_ranking,
         "event_status": event_status,
+        "alarm_stats": alarm_stats,
     })

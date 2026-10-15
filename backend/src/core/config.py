@@ -60,6 +60,12 @@ class Settings(BaseSettings):
     PLUGINS_BUILTIN_DIR: str = str(Path(__file__).resolve().parent.parent / "plugins" / "builtin")
     PLUGINS_UPLOAD_DIR: str = str(Path(__file__).resolve().parent.parent / "uploads" / "plugins")
     FILE_STORAGE_DIR: str = str(Path(__file__).resolve().parent.parent / "uploads" / "files")
+
+    # ---- Operation log ----
+    # 只记录写操作（默认），GET/HEAD/OPTIONS 不落 sys_log，避免监控台 3~30s
+    # 轮询等高频只读请求无限撑爆 sys_log（一次开着的 tab ≈ 500 万行/年）。
+    # 需要全量记录时可在 .env 改成 ["GET","POST","PUT","DELETE","PATCH"]。
+    OPERATION_LOG_METHODS: list[str] = ["POST", "PUT", "DELETE", "PATCH"]
     # Runtime plugin state is process-local. Use a single worker unless a
     # future coordinated control plane is configured.
     PLUGIN_RUNTIME_MODE: Literal["single_process"] = "single_process"

@@ -505,6 +505,9 @@ async function handleCameraChange() {
   eventIds.value = []
   timeline.value = []
   sinceId = 0
+  // 先播种实时告警水位到"当前最新一条"（不回灌历史）：选源/取消选源都执行，
+  // 避免 pollAlarms 从 since_id=0 拉到最旧告警或回灌旧 backlog
+  await seedTimeline()
   if (!cameraId.value) return
 
   // 解析视频文件播放地址（video 源）
@@ -529,7 +532,6 @@ async function handleCameraChange() {
   } catch {
     // ignore
   }
-  await seedTimeline()
 }
 
 // ── 启停监控（保留给深链自动开始：?camera_id&event_id 进入时调用）──
@@ -645,7 +647,7 @@ async function fetchTaskCards(silent = false) {
     // 截断丢失——恰好是最稳定长跑的那批，自查 P2-2）
     const runRes: any = await listTasks({ page: 1, page_size: 100, status: 'running' })
     const running = norm(runRes.items || [])
-    let stopped: any[]
+    let stopped: any[] = []
     let needFull = false
     if (silent) {
       // 静默轮询只更新运行中卡片（1 个请求）；停止卡指标不随时间变化，沿用旧数据。
@@ -765,34 +767,20 @@ async function railBatch(op: 'start' | 'stop') {
 }
 
 async function seedTimeline() {
-  // 以现有告警列表（倒序）初始化时间线与 since_id 水位
+  // 实时告警时间线只呈现"打开/切换监控台之后新产生"的告警：
+  // 把 since_id / since_ts 水位初始化到当前最新一条告警，且不回灌历史 backlog。
+  // 否则：① 没开任何监控任务时，右下角也会一直弹出以前的旧告警；
+  //      ② 未播种水位时 pollAlarms 以 since_id=0 起拉，而 alarms-since 按 id 升序，
+  //         会把最旧的一批告警当成"新告警"灌进来。新告警统一由 pollAlarms 增量拉取。
   try {
-    const params: any = { page: 1, page_size: 20 }
-    if (cameraId.value) params.camera_id = cameraId.value
-    const res: any = await request.get('/ai-vision/alarms', { params })
-    const items: any[] = res.items || []
-    sinceId = items.reduce((m, a) => Math.max(m, a.id), 0)
-    sinceTs = items.reduce((m: string, a: any) => (a.created_at && a.created_at > m ? a.created_at : m), '')
-    timeline.value = items
-      .map((a) => ({
-        ...a,
-        snapshot_url: snapshotUrl(a.snapshot_path),
-        camera_name: a.camera_name || cameras.value.find((c) => c.id === a.camera_id)?.name || `#${a.camera_id}`,
-        event_name: a.event_name || events.value.find((e) => e.id === a.event_id)?.name || '',
-        source_type: cameras.value.find((c) => c.id === a.camera_id)?.source_type || 'camera',
-        _fresh: false,
-      }))
-    // 列表接口按 id 倒序返回，正好 = 时间线"最新在前"的展示顺序
+    const res: any = await request.get('/ai-vision/alarms', { params: { page: 1, page_size: 1 } })
+    const latest = (res.items || [])[0]
+    sinceId = latest ? Number(latest.id) || 0 : 0
+    sinceTs = latest?.created_at || ''
+    timeline.value = []
   } catch {
     // ignore
   }
-}
-
-function snapshotUrl(path: string) {
-  if (!path) return ''
-  const idx = path.indexOf('ai_vision')
-  if (idx >= 0) return '/api/v1/ai-vision/media/' + path.slice(idx + 'ai_vision/'.length).replace(/\\/g, '/')
-  return ''
 }
 
 async function pollAlarms() {
@@ -943,6 +931,10 @@ onMounted(async () => {
   await fetchBase()
   fetchTaskCards()
   await pollStatus()
+  // 先播种实时告警水位（=当前最新一条，不回灌历史）：覆盖"未选源/无运行任务/
+  // 非 live tab 进入"等不触发 handleCameraChange 的场景，避免 pollAlarms 从
+  // since_id=0 起把最旧/历史告警灌进右下角时间线（后续 handleCameraChange 会再按源播种）
+  await seedTimeline()
 
   // 支持其它页面带参跳入：?tab=live|tasks|records & camera_id & event_id
   const q = route.query as Record<string, string>

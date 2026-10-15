@@ -63,6 +63,29 @@ async def list_logs(
     )
 
 
+@router.get("/stats")
+async def log_stats(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(require_permission("system:log:list"))],
+):
+    """日志统计：总量 + 按 HTTP 方法分布（验证写操作收窄后 GET 不再增长）。
+
+    注意：必须注册在 ``/{log_id}`` 之前，否则会被 ``/logs/{log_id}``
+    把 ``stats`` 当成 log_id（int 转换失败 → 422）。
+    """
+    from sqlalchemy import func, select
+
+    rows = (
+        await db.execute(
+            select(crud_log.model.method, func.count(crud_log.model.id)).group_by(
+                crud_log.model.method
+            )
+        )
+    ).all()
+    by_method = {m: c for m, c in rows}
+    return success_response(data={"total": sum(by_method.values()), "by_method": by_method})
+
+
 @router.get("/{log_id}")
 async def get_log(
     log_id: int,
@@ -114,3 +137,26 @@ async def clear_logs(
     await db.execute(stmt)
     await db.commit()
     return success_response(msg="已清空所有日志")
+
+
+@router.post("/cleanup")
+async def cleanup_logs(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(require_permission("system:log:delete"))],
+    days: int = Query(default=90, ge=1, le=3650, description="删除 days 天前的日志"),
+):
+    """按保留期手动清理（默认 90 天）：删除 created_at 早于 cutoff 的日志。
+
+    非自动删除——仅响应管理员主动调用，避免误删仍在查的操作审计记录。
+    （另外 ai_vision 插件启动时仍有一道 30 天安全网，二者互补。）
+    """
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    stmt = sa_delete(crud_log.model).where(crud_log.model.created_at < cutoff.replace(tzinfo=None))
+    result = await db.execute(stmt)
+    await db.commit()
+    return success_response(
+        data={"deleted": result.rowcount or 0},
+        msg=f"已清理 {days} 天前的日志 {result.rowcount or 0} 条",
+    )

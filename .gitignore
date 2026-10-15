@@ -27,6 +27,9 @@ runtimes/
 # Build check temp dirs
 dist_check*/
 
+# Runtime log files (loguru daily rotation sink: backend/logs/app_YYYY-MM-DD.log)
+logs/
+
 # Runtime uploads (plugin packages / media)
 backend/src/uploads/
 # 插件运行时产物（ai_vision 抓拍图/样本图/上传视频等）

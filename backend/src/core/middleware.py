@@ -62,6 +62,12 @@ class OperationLogMiddleware(BaseHTTPMiddleware):
         if not path.startswith("/api/v1/") or any(path.startswith(p) for p in self.SKIP_PREFIXES):
             return await call_next(request)
 
+        # 只记录写操作（POST/PUT/DELETE/PATCH）；GET/HEAD/OPTIONS 默认不落库，
+        # 避免监控台轮询等高频只读请求无限撑爆 sys_log。方法清单由
+        # settings.OPERATION_LOG_METHODS 控制（.env 可改回全量）。
+        if request.method not in settings.OPERATION_LOG_METHODS:
+            return await call_next(request)
+
         start = time.perf_counter()
         response = await call_next(request)
         elapsed_ms = int((time.perf_counter() - start) * 1000)

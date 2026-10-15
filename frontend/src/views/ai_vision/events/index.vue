@@ -342,6 +342,32 @@
             <el-input-number v-model="form.rule.face_verify_seconds" :min="3" :max="300" :step="5" />
             <el-text size="small" type="info">人证不符持续超过该秒数才告警（防路过/短暂入镜误报）</el-text>
           </el-form-item>
+          <el-form-item
+            v-if="['blacklist', 'stranger', 'record'].includes(form.rule.face_mode)"
+            :label="form.rule.face_mode === 'blacklist' ? '绑定指定黑名单人员' : (form.rule.face_mode === 'record' ? '绑定指定人员' : '排除指定白名单人员')"
+          >
+            <el-select
+              v-model="form.rule.face_selected_ids"
+              multiple
+              filterable
+              collapse-tags
+              collapse-tags-tooltip
+              :placeholder="form.rule.face_mode === 'blacklist' ? '不选 = 全部黑名单人员' : '不选 = 使用对应分组全部人员'"
+              style="width: 100%"
+            >
+              <el-option
+                v-for="f in selectedFaceOptions"
+                :key="f.id"
+                :label="`${f.name}${f.staff_no ? ' (' + f.staff_no + ')' : ''}${f.group === 'blacklist' ? '［黑名单］' : ''}`"
+                :value="f.id"
+              />
+            </el-select>
+            <el-text size="small" type="info" style="display: block">
+              <template v-if="form.rule.face_mode === 'blacklist'">只对这些黑名单人员报警，其余黑名单人员不触发告警。</template>
+              <template v-else-if="form.rule.face_mode === 'record'">只记录选中的人员流水，未选中的人员不记流水。</template>
+              <template v-else>选中的白名单人员视为"已知"（不报陌生人）；其余所有人都会当成陌生人报警。</template>
+            </el-text>
+          </el-form-item>
           <el-form-item label="相似度阈值">
             <el-slider v-model="form.rule.face_threshold" :min="0.2" :max="0.8" :step="0.01" show-input />
             <el-text size="small" type="info">人脸比对的余弦相似度阈值，默认 0.363（误报多调高，漏识别调低）</el-text>
@@ -454,7 +480,7 @@
 
 <script setup lang="ts">
 defineProps<{ embedded?: boolean }>()
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
@@ -517,6 +543,7 @@ const form = reactive({
     face_liveness_threshold: 0.5,
     face_verify_person_id: 0,
     face_verify_seconds: 10,
+    face_selected_ids: [] as number[],
   },
 })
 
@@ -717,7 +744,16 @@ async function fetchFaceOptions() {
   }
 }
 
-// ═══ 员工体貌档案（人岗验证）═══const staffDrawer = ref(false)
+/** 指定人脸绑定选择器：根据当前识别模式过滤可选人员 */
+const selectedFaceOptions = computed(() => {
+  const mode = form.rule.face_mode
+  if (mode === 'blacklist') return faceOptions.value.filter((f: any) => f.group === 'blacklist')
+  if (mode === 'stranger') return faceOptions.value.filter((f: any) => f.group === 'whitelist')
+  return faceOptions.value // record：白名单 + 黑名单
+})
+
+// ═══ 员工体貌档案（人岗验证）═══
+const staffDrawer = ref(false)
 const staffLoading = ref(false)
 const staffSaving = ref(false)
 const staffList = ref<any[]>([])
@@ -833,6 +869,17 @@ function openCreate() {
     identity_threshold: 0.55,
     identity_seconds: 30,
     identity_interval: 5,
+    face_mode: 'stranger',
+    face_threshold: 0.363,
+    face_min_size: 40,
+    face_interval: 1.0,
+    face_hold_seconds: 3,
+    face_record_interval: 60,
+    face_liveness: false,
+    face_liveness_threshold: 0.5,
+    face_verify_person_id: 0,
+    face_verify_seconds: 10,
+    face_selected_ids: [] as number[],
   }
   poolRoiText.value = ''
   poolRoiError.value = false
@@ -876,6 +923,17 @@ function openEdit(row: any) {
     identity_threshold: row.rule?.identity_threshold ?? 0.55,
     identity_seconds: row.rule?.identity_seconds ?? 30,
     identity_interval: row.rule?.identity_interval ?? 5,
+    face_mode: row.rule?.face_mode ?? 'stranger',
+    face_threshold: row.rule?.face_threshold ?? 0.363,
+    face_min_size: row.rule?.face_min_size ?? 40,
+    face_interval: row.rule?.face_interval ?? 1.0,
+    face_hold_seconds: row.rule?.face_hold_seconds ?? 3,
+    face_record_interval: row.rule?.face_record_interval ?? 60,
+    face_liveness: row.rule?.face_liveness ?? false,
+    face_liveness_threshold: row.rule?.face_liveness_threshold ?? 0.5,
+    face_verify_person_id: row.rule?.face_verify_person_id ?? 0,
+    face_verify_seconds: row.rule?.face_verify_seconds ?? 10,
+    face_selected_ids: Array.isArray(row.rule?.face_selected_ids) ? row.rule.face_selected_ids : [],
   }
   poolRoiText.value = row.rule?.pool_roi?.length ? JSON.stringify(row.rule.pool_roi) : ''
   poolRoiError.value = false
@@ -963,6 +1021,35 @@ async function handleSave() {
       ElMessage.warning('人岗验证需要先登记至少一名员工档案（表单内"管理员工档案"）；未登记时该事件不会告警')
       return
     }
+  }
+  // face 模式前置校验：不同识别模式要求不同，避免"事件能保存但永远不告警"或"告警风暴"
+  if (form.rule.detector === 'face') {
+    const mode = form.rule.face_mode
+    const selectedIds: number[] = form.rule.face_selected_ids || []
+    if (mode === 'verify') {
+      // 1:1 人证核验：必须选定核验对象，否则判定逻辑不生效（不会误报，但会静默无效）
+      if (!form.rule.face_verify_person_id) {
+        ElMessage.warning('1:1 人证核验需要先选择"核验对象"（人脸库中的人员）；未选择时该事件不会生效')
+        return
+      }
+    } else if (mode === 'blacklist') {
+      // 黑名单告警：必须有黑名单人员可比对；黑名单与指定人员都为空 = 永不触发
+      const hasBlacklist = faceOptions.value.some((f: any) => f.group === 'blacklist')
+      if (!hasBlacklist && selectedIds.length === 0) {
+        ElMessage.warning('黑名单告警需要先到「人脸库」登记至少一个黑名单人员；当前无任何黑名单人员，事件不会触发告警')
+        return
+      }
+    } else if (mode === 'stranger') {
+      // 陌生人告警：白名单为空且未排除指定人员 → 所有人都判陌生人 → 告警风暴
+      const hasWhitelist = faceOptions.value.some((f: any) => f.group === 'whitelist')
+      if (!hasWhitelist && selectedIds.length === 0) {
+        ElMessage.warning('白名单为空，所有人都会被判定为"陌生人"并持续告警（告警风暴）。请先在「人脸库」登记白名单人员，或在"排除指定白名单人员"中选择已知人员')
+        return
+      }
+    }
+    // 兜底：过滤已删除/换组的脏 face_selected_ids，避免无效数据落库
+    const validIds = selectedIds.filter((id: number) => faceOptions.value.some((f: any) => f.id === id))
+    form.rule.face_selected_ids = validIds
   }
   saving.value = true
   try {
