@@ -25,7 +25,7 @@ jobs:
       - name: Run pytest
         run: |
           set -o pipefail
-          pytest -q 2>&1 | tee pytest_out.txt
+          pytest -q --timeout=60 2>&1 | tee pytest_out.txt
       - name: Annotate failing tests
         # 把 pytest 失败摘要打成 check-run 标注（::error::），
         # 标注是公开的，可直接经 API/页面查看，省去下载完整日志。

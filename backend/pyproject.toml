@@ -27,12 +27,15 @@ dependencies = [
     "numpy>=1.24.0",
     "opencv-python-headless>=4.10.0",
     "onnxruntime>=1.16.0",
+    # ── 报警外发（MQTT / Webhook）：MQTT 渠道依赖，未安装则自动降级 ──
+    "paho-mqtt>=2.1.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "pytest-timeout>=2.3.0",
     "httpx>=0.27.0",
     "ruff>=0.6.0",
     "mypy>=1.11.0",
@@ -66,6 +69,9 @@ warn_return_any = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# 防止个别网络/线程测试挂起导致 CI 卡死（默认 60s 超时）
+timeout = 60
+
 
 [tool.alembic]
 script_location = "alembic"

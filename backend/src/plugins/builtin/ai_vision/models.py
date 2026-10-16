@@ -29,12 +29,17 @@ if TYPE_CHECKING:
 
 
 class AIVisionCamera(IDMixin, TimestampMixin, Base):
-    """视频源：RTSP 摄像头 / 本地视频文件。
+    """视频源：RTSP 摄像头 / GB28181 设备 / ONVIF 设备 / 本地视频文件。
 
     ``source_type``:
     - ``camera``：RTSP 实时流，``rtsp_url`` 存 RTSP 地址
     - ``video``：本地视频文件（测试/演示），``rtsp_url`` 存文件绝对路径
       （由上传接口 ``POST /ai-vision/videos/upload`` 生成）
+
+    ``protocol``:
+    - ``rtsp``：RTSP/RTP 协议（传统摄像头）
+    - ``gb28181``：GB/T 28181 国标协议（支持设备注册/保活/RTP 推流）
+    - ``onvif``：ONVIF 协议（网络视频接口标准）
     """
 
     __tablename__ = "ai_vision_cameras"
@@ -44,8 +49,35 @@ class AIVisionCamera(IDMixin, TimestampMixin, Base):
         String(20), default="camera", server_default="camera",
         comment="接入类型：camera=RTSP 摄像头 / video=本地视频文件",
     )
+    protocol: Mapped[str] = mapped_column(
+        String(20), default="rtsp", server_default="rtsp",
+        comment="视频协议：rtsp=RTSP / gb28181=GB28181 / onvif=ONVIF",
+    )
     rtsp_url: Mapped[str] = mapped_column(
-        String(500), comment="RTSP 地址或视频文件绝对路径"
+        String(500), nullable=True, comment="RTSP 地址或视频文件绝对路径（GB28181/ONVIF 时可为空）"
+    )
+    # GB28181 专用字段
+    gb_device_id: Mapped[str] = mapped_column(
+        String(50), nullable=True, comment="GB28181 设备ID"
+    )
+    gb_ip: Mapped[str] = mapped_column(
+        String(50), nullable=True, comment="GB28181 设备IP"
+    )
+    gb_port: Mapped[int] = mapped_column(
+        Integer, nullable=True, comment="GB28181 设备端口"
+    )
+    gb_channel: Mapped[str] = mapped_column(
+        String(20), nullable=True, comment="GB28181 通道ID"
+    )
+    # ONVIF 专用字段
+    onvif_url: Mapped[str] = mapped_column(
+        String(200), nullable=True, comment="ONVIF 地址"
+    )
+    onvif_username: Mapped[str] = mapped_column(
+        String(50), nullable=True, comment="ONVIF 用户名"
+    )
+    onvif_password: Mapped[str] = mapped_column(
+        String(50), nullable=True, comment="ONVIF 密码"
     )
     location: Mapped[str] = mapped_column(String(200), default="", comment="位置描述")
     vendor: Mapped[str] = mapped_column(String(100), default="", comment="厂商/型号")

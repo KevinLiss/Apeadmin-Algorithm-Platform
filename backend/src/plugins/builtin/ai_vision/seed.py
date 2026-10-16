@@ -86,6 +86,10 @@ async def _seed_menus(db: AsyncSession) -> None:
         ("登记人脸", "人脸库", "F", None, None, "ai_vision:face:create", None, 1),
         ("删除人脸", "人脸库", "F", None, None, "ai_vision:face:delete", None, 2),
         ("识别记录", "AI 视觉平台", "C", "face-logs", "ai_vision/face_logs/index", "ai_vision:face_log:list", "Tickets", 8),
+        # ── 模型版本管理（阶段一 model_manager，顶层 /api/v1/models）──
+        ("模型版本", "AI 视觉平台", "C", "models", "ai_vision/models/index", "ai_vision:model_version:list", "Files", 10),
+        ("切换版本", "模型版本", "F", None, None, "ai_vision:model_version:switch", None, 1),
+        ("校验模型", "模型版本", "F", None, None, "ai_vision:model_version:validate", None, 2),
     ]
 
     existing = list((await db.execute(select(Menu))).scalars().all())
@@ -122,7 +126,8 @@ async def _seed_menus(db: AsyncSession) -> None:
     # ── 页面归并迁移（幂等）：隐藏被归并的旧页菜单 ──
     # 保留 status=1（权限字符串继续生效，embedded 组件与深链路由可用），
     # 仅 visible=0（侧边栏不显示）。重复执行无副作用。
-    merged_hidden = {"识别事件", "任务编排", "告警中心", "类别库", "样本库"}
+    # 2026-10-16：视频源接入（GB28181/ONVIF/RTSP）已合并进「摄像头管理」，独立菜单隐藏。
+    merged_hidden = {"识别事件", "任务编排", "告警中心", "类别库", "样本库", "视频源接入"}
     # 可见菜单排序归一：监控台(3) → 规则配置(4) → 摄像头(5) → 模型训练(6)
     sort_norm = {"实时监控台": 3, "规则配置": 4, "摄像头管理": 5, "模型训练": 6}
     changed = 0

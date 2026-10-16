@@ -20,15 +20,46 @@ class PageOut(BaseModel):
 class CameraCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=200, description="摄像头名称")
     source_type: str = Field(default="camera", description="camera=RTSP / video=本地视频文件")
-    rtsp_url: str = Field(..., min_length=1, max_length=500, description="RTSP 地址或视频文件绝对路径")
+    protocol: str = Field(default="rtsp", description="rtsp=RTSP / gb28181=国标 / onvif=ONVIF")
+    rtsp_url: str | None = Field(default=None, max_length=500, description="RTSP 地址或视频文件路径（GB28181/ONVIF 可空）")
+    # GB28181 专用
+    gb_device_id: str | None = Field(default=None, max_length=50, description="GB28181 设备ID")
+    gb_ip: str | None = Field(default=None, max_length=50, description="GB28181 设备IP")
+    gb_port: int | None = Field(default=None, description="GB28181 设备端口")
+    gb_channel: str | None = Field(default=None, max_length=20, description="GB28181 通道ID")
+    # ONVIF 专用
+    onvif_url: str | None = Field(default=None, max_length=200, description="ONVIF 地址")
+    onvif_username: str | None = Field(default=None, max_length=50, description="ONVIF 用户名")
+    onvif_password: str | None = Field(default=None, max_length=50, description="ONVIF 密码")
     location: str = Field(default="", max_length=200)
     vendor: str = Field(default="", max_length=100)
+
+    @model_validator(mode="after")
+    def _check_protocol_fields(self):
+        """按协议校验必填字段。"""
+        if self.protocol not in ("rtsp", "gb28181", "onvif"):
+            raise ValueError("protocol 仅支持 rtsp/gb28181/onvif")
+        if self.protocol == "rtsp" and self.source_type != "video" and not self.rtsp_url:
+            raise ValueError("RTSP 协议必须提供 rtsp_url")
+        if self.protocol == "gb28181" and not self.gb_device_id:
+            raise ValueError("GB28181 协议必须提供 gb_device_id")
+        if self.protocol == "onvif" and not self.onvif_url:
+            raise ValueError("ONVIF 协议必须提供 onvif_url")
+        return self
 
 
 class CameraUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     source_type: str | None = Field(default=None, description="camera/video")
-    rtsp_url: str | None = Field(default=None, min_length=1, max_length=500)
+    protocol: str | None = Field(default=None, description="rtsp/gb28181/onvif")
+    rtsp_url: str | None = Field(default=None, max_length=500)
+    gb_device_id: str | None = Field(default=None, max_length=50)
+    gb_ip: str | None = Field(default=None, max_length=50)
+    gb_port: int | None = Field(default=None)
+    gb_channel: str | None = Field(default=None, max_length=20)
+    onvif_url: str | None = Field(default=None, max_length=200)
+    onvif_username: str | None = Field(default=None, max_length=50)
+    onvif_password: str | None = Field(default=None, max_length=50)
     location: str | None = Field(default=None, max_length=200)
     vendor: str | None = Field(default=None, max_length=100)
 
@@ -38,7 +69,15 @@ class CameraOut(BaseModel):
     id: int
     name: str
     source_type: str = "camera"
-    rtsp_url: str
+    protocol: str = "rtsp"
+    rtsp_url: str | None = None
+    gb_device_id: str | None = None
+    gb_ip: str | None = None
+    gb_port: int | None = None
+    gb_channel: str | None = None
+    onvif_url: str | None = None
+    onvif_username: str | None = None
+    onvif_password: str | None = None
     location: str
     vendor: str
     status: str

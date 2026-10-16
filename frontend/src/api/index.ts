@@ -200,6 +200,36 @@ export function chatStream(
   return controller
 }
 
+// ---- 报警外发（MQTT / Webhook） ----
+export const getNotificationConfig = () => request.get('/notifications/config')
+export const saveNotificationConfig = (data: any) => request.post('/notifications/config', data)
+export const getNotificationStatus = () => request.get('/notifications/status')
+export const testNotification = (channel: string) => request.post('/notifications/test', { channel })
+
+// ---- 视频源接入（GB28181 / ONVIF / RTSP） ----
+export const getVideoProtocols = () => request.get('/video/protocols')
+export const getGb28181Status = () => request.get('/video/gb28181/status')
+export const startGb28181 = (data?: any) => request.post('/video/gb28181/start', data || {})
+export const stopGb28181 = () => request.post('/video/gb28181/stop')
+export const getGb28181Devices = () => request.get('/video/gb28181/devices')
+export const discoverOnvif = (timeout?: number) =>
+  request.post('/video/onvif/discover', {}, { params: { timeout: timeout ?? 3 }, timeout: 30000 })
+export const testOnvif = (data: any) => request.post('/video/onvif/test', data, { timeout: 20000 })
+export const ptzOnvif = (data: any) => request.post('/video/onvif/ptz', data)
+export const createVideoSource = (data: any) => request.post('/video/sources', data)
+export const listVideoSources = () => request.get('/video/sources')
+export const deleteVideoSource = (cameraId: number) => request.delete(`/video/sources/${cameraId}`)
+
+// ---- 模型版本管理 ----
+export const listModels = () => request.get('/models')
+export const getModel = (name: string) => request.get(`/models/${name}`)
+export const getModelVersions = (name: string) => request.get(`/models/${name}/versions`)
+export const switchModelVersion = (name: string, version: string) =>
+  request.post(`/models/${name}/switch`, { version })
+export const validateModel = (name: string, version?: string) =>
+  request.post(`/models/${name}/validate`, {}, { params: version ? { version } : {} })
+export const validateAllModels = () => request.post('/models/validate-all')
+
 // ---- Dev Example (插件开发示例) ----
 export const getDevExampleNotes = (params: any) => request.get('/dev-example/notes', { params })
 export const createDevExampleNote = (data: any) => request.post('/dev-example/notes', data)

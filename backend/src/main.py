@@ -128,6 +128,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Restore persisted MCP tool registrations from DB
         await _restore_mcp_tools_from_db()
 
+    # 报警外发：装载通知配置 + 启动后台消费线程（MQTT/Webhook 推送）
+    from src.notification import notification_manager
+
+    await notification_manager.refresh_config()
+    notification_manager.start()
+
     # Emit startup event
     from src.plugins import event_bus, Event
     await event_bus.emit(Event.APP_STARTUP)
@@ -138,6 +144,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # ---- Shutdown ----
     logger.info(f"Shutting down {settings.APP_NAME}...")
+
+    # 停止通知后台消费线程
+    try:
+        from src.notification import notification_manager
+
+        notification_manager.stop()
+    except Exception:  # noqa: BLE001
+        pass
 
     if settings.PLUGINS_ENABLED:
         from src.plugins import plugin_manager

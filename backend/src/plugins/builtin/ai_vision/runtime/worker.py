@@ -1717,6 +1717,13 @@ class StreamWorker:
                 publish(bus_payload)
             except Exception:  # noqa: BLE001
                 pass
+            # 报警外发（MQTT/Webhook）：非阻塞提交到后台队列，由 manager 线程发送
+            try:
+                from src.notification import notification_manager
+
+                notification_manager.submit(bus_payload)
+            except Exception:  # noqa: BLE001
+                pass
             self._emit(ALARM_RAISED, bus_payload)
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[AIVision] alarm save failed: {exc}")

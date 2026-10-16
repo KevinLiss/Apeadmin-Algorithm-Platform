@@ -115,21 +115,37 @@ async def create_camera(
     user: Annotated[User, Depends(get_current_user)],
     _perm: Annotated[User, Depends(_require_perm("ai_vision:camera:create"))],
 ):
-    """新增视频源（RTSP 摄像头 / 本地视频文件，初始 status=unknown）。"""
+    """新增视频源（RTSP 摄像头 / GB28181 / ONVIF / 本地视频文件，初始 status=unknown）。"""
     source_type = body.source_type if body.source_type in ("camera", "video") else "camera"
+    protocol = body.protocol if body.protocol in ("rtsp", "gb28181", "onvif") else "rtsp"
     if source_type == "video":
         # 视频文件源：校验文件存在
         from pathlib import Path
 
-        if not Path(body.rtsp_url).is_file():
+        if not body.rtsp_url or not Path(body.rtsp_url).is_file():
             raise HTTPException(
                 status_code=400,
                 detail=f"视频文件不存在: {body.rtsp_url}，请先上传视频",
             )
+    if protocol == "rtsp" and source_type == "camera" and not body.rtsp_url:
+        raise HTTPException(status_code=400, detail="RTSP 摄像头必须提供 rtsp_url")
+    if protocol == "gb28181" and not body.gb_device_id:
+        raise HTTPException(status_code=400, detail="GB28181 源必须提供 gb_device_id")
+    if protocol == "onvif" and not body.onvif_url:
+        raise HTTPException(status_code=400, detail="ONVIF 源必须提供 onvif_url")
+
     item = AIVisionCamera(
         name=body.name,
         source_type=source_type,
+        protocol=protocol,
         rtsp_url=body.rtsp_url,
+        gb_device_id=body.gb_device_id,
+        gb_ip=body.gb_ip,
+        gb_port=body.gb_port,
+        gb_channel=body.gb_channel,
+        onvif_url=body.onvif_url,
+        onvif_username=body.onvif_username,
+        onvif_password=body.onvif_password,
         location=body.location,
         vendor=body.vendor,
         status="unknown",
@@ -269,24 +285,81 @@ async def test_camera(
 ):
     """视频源连通性测试，返回一帧快照 base64。
 
-    - camera 源：RTSP 连通性测试
+    - rtsp camera 源：RTSP 连通性测试
     - video 源：读取视频第一帧（验证文件可解码）
+    - gb28181 源：检查 GB28181 服务器运行状态 + 设备注册状态
+    - onvif 源：ONVIF 连通性测试（连接 + 获取流地址）
 
     测试成功更新 last_online_at / status；失败置 status=offline。
     未安装 L1 运行环境时返回 409 提示。
     """
     item = await _get_or_404(db, camera_id)
-    url = rtsp_url or item.rtsp_url
+    protocol = getattr(item, "protocol", "rtsp") or "rtsp"
 
-    try:
-        result = await test_rtsp(url, timeout=5.0)
-    except RuntimeNotInstalledError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"测试执行异常: {exc}") from exc
+    # ---- GB28181：检查服务器 + 设备注册 ----
+    if protocol == "gb28181":
+        from src.video.factory import VideoFactory
+
+        server = VideoFactory.get_gb28181_server()
+        if server is None:
+            raise HTTPException(status_code=503, detail="GB28181 服务器未运行，请先启动")
+        device = server.get_device(item.gb_device_id or "")
+        if device is None:
+            raise HTTPException(status_code=503, detail=f"设备未注册: {item.gb_device_id}")
+        ok = device.is_online()
+        result = {
+            "ok": ok,
+            "protocol": "gb28181",
+            "device_id": item.gb_device_id,
+            "device_status": device.status.value,
+            "last_heartbeat": device.last_heartbeat.isoformat() if device.last_heartbeat else None,
+        }
+
+    # ---- ONVIF：连接 + 获取流地址 ----
+    elif protocol == "onvif":
+        from urllib.parse import urlparse
+
+        from src.video.onvif import ONVIFClient
+
+        parsed = urlparse(
+            item.onvif_url if "://" in (item.onvif_url or "")
+            else f"http://{item.onvif_url}"
+        )
+        client = ONVIFClient(
+            host=parsed.hostname or item.onvif_url,
+            port=parsed.port or 80,
+            username=item.onvif_username or "admin",
+            password=item.onvif_password or "admin",
+        )
+        connected = await client.connect()
+        if not connected:
+            result = {"ok": False, "protocol": "onvif", "message": "ONVIF 连接失败"}
+        else:
+            try:
+                stream_url = await client.get_stream_uri()
+                result = {
+                    "ok": bool(stream_url),
+                    "protocol": "onvif",
+                    "stream_url": stream_url,
+                    "message": "连接成功" if stream_url else "未获取到流地址",
+                }
+            except Exception as exc:  # noqa: BLE001
+                result = {"ok": False, "protocol": "onvif", "message": str(exc)}
+            finally:
+                await client.disconnect()
+
+    # ---- RTSP / video：原有逻辑 ----
+    else:
+        url = rtsp_url or item.rtsp_url
+        try:
+            result = await test_rtsp(url, timeout=5.0)
+        except RuntimeNotInstalledError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"测试执行异常: {exc}") from exc
 
     # 更新摄像头状态
-    if result["ok"]:
+    if result.get("ok"):
         item.status = "online"
         item.last_online_at = datetime.now(timezone.utc)
     else:
@@ -298,7 +371,7 @@ async def test_camera(
     result["camera_status"] = item.status
     return success_response(
         data=result,
-        msg="视频源测试成功" if result["ok"] else "视频源测试失败",
+        msg="视频源测试成功" if result.get("ok") else "视频源测试失败",
     )
 
 

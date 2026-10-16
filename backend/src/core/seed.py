@@ -121,6 +121,10 @@ async def _seed_menus(db: AsyncSession) -> None:
         # System log
         ("系统日志", "系统管理", "C", "log", "system/log/index", "system:log:list", "Document", 6),
         ("删除日志", "系统日志", "F", None, None, "system:log:delete", None, 1),
+        # 报警外发（MQTT / Webhook）
+        ("报警外发", "系统管理", "C", "notifications", "system/notifications/index", "system:notification:list", "Bell", 7),
+        ("编辑通知配置", "报警外发", "F", None, None, "system:notification:edit", None, 1),
+        ("测试通知", "报警外发", "F", None, None, "system:notification:test", None, 2),
         # MCP menu
         ("MCP 管理", None, "M", "/mcp", None, None, "Connection", 20),
         ("工具列表", "MCP 管理", "C", "tools", "mcp/tools", "mcp:tools:list", "Tools", 1),
