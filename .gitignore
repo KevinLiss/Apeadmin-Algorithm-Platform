@@ -89,6 +89,7 @@ APEHUB_WEB_*.md
 .temp/
 *.log
 *.tmp
+.workbuddy/
 
 # Deploy package staging / artifacts
 deploy/.stage/
