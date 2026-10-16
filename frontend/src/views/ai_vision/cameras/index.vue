@@ -623,8 +623,8 @@ async function refreshVideoSources() {
       getGb28181Status(), getGb28181Devices(), listVideoSources(),
     ])
     Object.assign(gbStatus, st)
-    gbDevices.value = dev.items || []
-    sources.value = src.items || []
+    gbDevices.value = (dev as any).items || []
+    sources.value = (src as any).items || []
   } catch {
     ElMessage.warning('刷新失败')
   } finally {
